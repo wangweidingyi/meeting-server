@@ -2,119 +2,102 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+
+	"github.com/gin-gonic/gin"
 )
 
 func NewHandler(service *Service) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/admin/settings", func(writer http.ResponseWriter, request *http.Request) {
-		setCORSHeaders(writer)
-		if request.Method == http.MethodOptions {
-			writer.WriteHeader(http.StatusNoContent)
-			return
-		}
+	engine := gin.New()
+	engine.HandleMethodNotAllowed = true
+	engine.Use(gin.Recovery(), corsMiddleware())
 
-		switch request.Method {
-		case http.MethodGet:
-			writeJSON(writer, http.StatusOK, service.Current())
-		case http.MethodPut:
-			var payload UpdateSettingsRequest
-			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-				writeJSON(writer, http.StatusBadRequest, map[string]string{
-					"error": "invalid_json",
-				})
-				return
-			}
-
-			settings, err := service.Update(request.Context(), payload)
-			if err != nil {
-				writeJSON(writer, http.StatusBadRequest, map[string]string{
-					"error": err.Error(),
-				})
-				return
-			}
-
-			writeJSON(writer, http.StatusOK, settings)
-		default:
-			writer.WriteHeader(http.StatusMethodNotAllowed)
-		}
+	adminRoutes := engine.Group("/api/admin")
+	adminRoutes.GET("/settings", func(context *gin.Context) {
+		context.JSON(http.StatusOK, service.Current())
 	})
-
-	mux.HandleFunc("/api/admin/settings/test", func(writer http.ResponseWriter, request *http.Request) {
-		setCORSHeaders(writer)
-		if request.Method == http.MethodOptions {
-			writer.WriteHeader(http.StatusNoContent)
-			return
-		}
-		if request.Method != http.MethodPost {
-			writer.WriteHeader(http.StatusMethodNotAllowed)
+	adminRoutes.PUT("/settings", func(context *gin.Context) {
+		payload, ok := decodeUpdateSettingsRequest(context, false)
+		if !ok {
 			return
 		}
 
-		var payload UpdateSettingsRequest
-		if request.Body != nil {
-			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil && err.Error() != "EOF" {
-				writeJSON(writer, http.StatusBadRequest, map[string]string{
-					"error": "invalid_json",
-				})
-				return
-			}
-		}
-
-		result, err := service.Test(request.Context(), payload)
+		settings, err := service.Update(context.Request.Context(), payload)
 		if err != nil {
-			writeJSON(writer, http.StatusBadRequest, map[string]string{
+			context.JSON(http.StatusBadRequest, gin.H{
 				"error": err.Error(),
 			})
 			return
 		}
 
-		writeJSON(writer, http.StatusOK, result)
+		context.JSON(http.StatusOK, settings)
 	})
-
-	mux.HandleFunc("/api/admin/users", func(writer http.ResponseWriter, request *http.Request) {
-		setCORSHeaders(writer)
-		if request.Method == http.MethodOptions {
-			writer.WriteHeader(http.StatusNoContent)
-			return
-		}
-		if request.Method != http.MethodGet {
-			writer.WriteHeader(http.StatusMethodNotAllowed)
+	adminRoutes.POST("/settings/test", func(context *gin.Context) {
+		payload, ok := decodeUpdateSettingsRequest(context, true)
+		if !ok {
 			return
 		}
 
-		writeJSON(writer, http.StatusOK, map[string]any{
+		result, err := service.Test(context.Request.Context(), payload)
+		if err != nil {
+			context.JSON(http.StatusBadRequest, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		context.JSON(http.StatusOK, result)
+	})
+	adminRoutes.GET("/users", func(context *gin.Context) {
+		context.JSON(http.StatusOK, gin.H{
 			"items": []any{},
 		})
 	})
-
-	mux.HandleFunc("/api/admin/health", func(writer http.ResponseWriter, request *http.Request) {
-		setCORSHeaders(writer)
-		if request.Method == http.MethodOptions {
-			writer.WriteHeader(http.StatusNoContent)
-			return
-		}
-		if request.Method != http.MethodGet {
-			writer.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-
-		writeJSON(writer, http.StatusOK, map[string]string{
+	adminRoutes.GET("/health", func(context *gin.Context) {
+		context.JSON(http.StatusOK, gin.H{
 			"status": "ok",
 		})
 	})
 
-	return mux
+	return engine
 }
 
-func setCORSHeaders(writer http.ResponseWriter) {
-	writer.Header().Set("Access-Control-Allow-Origin", "*")
-	writer.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	writer.Header().Set("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
+func corsMiddleware() gin.HandlerFunc {
+	return func(context *gin.Context) {
+		context.Header("Access-Control-Allow-Origin", "*")
+		context.Header("Access-Control-Allow-Headers", "Content-Type")
+		context.Header("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
+
+		if context.Request.Method == http.MethodOptions {
+			context.Status(http.StatusNoContent)
+			context.Abort()
+			return
+		}
+
+		context.Next()
+	}
 }
 
-func writeJSON(writer http.ResponseWriter, status int, payload any) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(payload)
+func decodeUpdateSettingsRequest(context *gin.Context, allowEmptyBody bool) (UpdateSettingsRequest, bool) {
+	var payload UpdateSettingsRequest
+	if context.Request.Body == nil {
+		return payload, true
+	}
+
+	if err := json.NewDecoder(context.Request.Body).Decode(&payload); err != nil {
+		if allowEmptyBody && errors.Is(err, http.ErrBodyNotAllowed) {
+			return payload, true
+		}
+		if allowEmptyBody && err.Error() == "EOF" {
+			return payload, true
+		}
+
+		context.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_json",
+		})
+		return UpdateSettingsRequest{}, false
+	}
+
+	return payload, true
 }

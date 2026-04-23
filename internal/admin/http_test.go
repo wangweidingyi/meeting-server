@@ -8,8 +8,27 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+
 	"meeting-server/internal/config"
 )
+
+func TestNewHandlerReturnsGinEngine(t *testing.T) {
+	service := NewService(NewMemoryStore(), config.AIConfig{
+		STT: config.ModelProviderConfig{Provider: "stub"},
+		LLM: config.ModelProviderConfig{Provider: "stub"},
+		TTS: config.SpeechProviderConfig{Provider: "stub"},
+	}, func(config.AIConfig) {})
+
+	if err := service.Bootstrap(context.Background()); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	handler := NewHandler(service)
+	if _, ok := handler.(*gin.Engine); !ok {
+		t.Fatalf("expected *gin.Engine, got %T", handler)
+	}
+}
 
 func TestHandlerReturnsCurrentSettings(t *testing.T) {
 	service := NewService(NewMemoryStore(), config.AIConfig{
