@@ -35,6 +35,20 @@ Supported variables:
 - `MEETING_STT_BASE_URL`
 - `MEETING_STT_API_KEY`
 - `MEETING_STT_MODEL`
+- `MEETING_STT_APP_KEY`
+- `MEETING_STT_RESOURCE_ID`
+- `MEETING_STT_LANGUAGE`
+- `MEETING_STT_AUDIO_FORMAT`
+- `MEETING_STT_AUDIO_CODEC`
+- `MEETING_STT_SAMPLE_RATE`
+- `MEETING_STT_BITS`
+- `MEETING_STT_CHANNELS`
+- `MEETING_STT_ENABLE_ITN`
+- `MEETING_STT_ENABLE_PUNC`
+- `MEETING_STT_ENABLE_NONSTREAM`
+- `MEETING_STT_SHOW_UTTERANCES`
+- `MEETING_STT_RESULT_TYPE`
+- `MEETING_STT_END_WINDOW_SIZE`
 - `MEETING_LLM_PROVIDER`
 - `MEETING_LLM_BASE_URL`
 - `MEETING_LLM_API_KEY`
@@ -51,6 +65,13 @@ If `MEETING_DATABASE_URL` is set, the admin API will persist runtime settings in
 If `MEETING_DATABASE_URL` is empty, the admin API still starts, but settings stay in memory only for the current process.
 If `MEETING_LLM_PROVIDER=openai_compatible`, the summary and action-item pipelines will attempt real OpenAI-compatible model calls instead of the default stub provider.
 If `MEETING_STT_PROVIDER=openai_compatible`, the backend will wrap accumulated PCM uplink data into WAV and call an OpenAI-compatible `/audio/transcriptions` endpoint. The current MVP uses cumulative chunk uploads rather than a true streaming ASR session.
+If `MEETING_STT_PROVIDER=volcengine_streaming`, the backend will open a live WebSocket STT session using the configured Volcengine headers and emit transcript deltas from server responses.
+
+### STT provider notes
+
+- `stub`: emits fake incremental transcript text for local protocol testing.
+- `openai_compatible`: accumulates uplink PCM, wraps it into WAV, and repeatedly calls an HTTP transcription endpoint.
+- `volcengine_streaming`: uses Volcengine's streaming WebSocket protocol for live ASR. `MEETING_STT_API_KEY` maps to the access key, while provider-specific headers such as app key and resource ID are provided through the STT option variables above or through the admin UI.
 
 ## Run locally
 
@@ -103,7 +124,7 @@ go test ./...
 ## Current limitations
 
 - The backend can now host a local embedded MQTT broker for desktop development, but production-grade clustering/auth/TLS for MQTT is not implemented yet.
-- STT now supports a minimal OpenAI-compatible HTTP transcription path, but it is still not a true streaming ASR implementation with VAD-aware segmentation or long-session context reuse.
+- STT now supports both the legacy OpenAI-compatible HTTP transcription path and a first live `volcengine_streaming` provider, but only Volcengine's documented protocol is wired today. Multi-vendor streaming adapters still need to be added one by one.
 - Admin settings now support lightweight provider connectivity tests for STT / LLM / TTS, but these are smoke checks rather than full production traffic simulations.
 - Summary and action-item pipelines now have OpenAI-compatible model-call seams, but default to stub mode unless LLM provider variables are configured.
 - TTS provider wiring is prepared for future meeting-side playback/export features, but is not yet attached to the current MQTT/UDP meeting protocol.

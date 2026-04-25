@@ -160,15 +160,44 @@ func (StubGenerator) mustGenerate(_ string, snippets []string, actionItems []str
 }
 
 type OpenAICompatibleGenerator struct {
+	providerName string
 	client *openaicompat.ChatClient
 }
 
 func NewOpenAICompatibleGenerator(client *openaicompat.ChatClient) *OpenAICompatibleGenerator {
-	return &OpenAICompatibleGenerator{client: client}
+	return &OpenAICompatibleGenerator{
+		providerName: "openai_compatible",
+		client:       client,
+	}
+}
+
+func NewOpenAIGenerator(client *openaicompat.ChatClient) *OpenAICompatibleGenerator {
+	return &OpenAICompatibleGenerator{
+		providerName: "openai",
+		client:       client,
+	}
+}
+
+func NewDeepSeekGenerator(client *openaicompat.ChatClient) *OpenAICompatibleGenerator {
+	return &OpenAICompatibleGenerator{
+		providerName: "deepseek",
+		client:       client,
+	}
+}
+
+func NewKimiGenerator(client *openaicompat.ChatClient) *OpenAICompatibleGenerator {
+	return &OpenAICompatibleGenerator{
+		providerName: "kimi",
+		client:       client,
+	}
 }
 
 func (g *OpenAICompatibleGenerator) Name() string {
-	return "openai_compatible"
+	if g.providerName == "" {
+		return "openai_compatible"
+	}
+
+	return g.providerName
 }
 
 func (g *OpenAICompatibleGenerator) Generate(ctx context.Context, sessionID string, snippets []string, actionItems []string, isFinal bool) (Result, error) {

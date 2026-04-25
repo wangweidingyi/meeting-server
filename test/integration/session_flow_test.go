@@ -4,11 +4,29 @@ import (
 	"testing"
 
 	"meeting-server/internal/app"
+	"meeting-server/internal/config"
 	"meeting-server/internal/protocol"
 )
 
 func TestSessionFlowProducesRealtimeAndFinalEvents(t *testing.T) {
-	application := app.New()
+	application := app.NewFromConfig(config.Config{
+		UDP: config.UDPConfig{
+			Host: "127.0.0.1",
+			Port: 6000,
+		},
+		HTTP: config.HTTPConfig{
+			Host: "127.0.0.1",
+			Port: 8090,
+		},
+		Database: config.DatabaseConfig{
+			URL: "postgres://meeting:secret@127.0.0.1:5432/meeting",
+		},
+		AI: config.AIConfig{
+			STT: config.STTProviderConfig{Provider: "stub"},
+			LLM: config.ModelProviderConfig{Provider: "stub"},
+			TTS: config.SpeechProviderConfig{Provider: "stub"},
+		},
+	})
 
 	helloReplies, err := application.MQTTServer.HandleControlMessage(protocolAwareControl("session/hello", "client-a", "session-1", "集成测试会"))
 	if err != nil {

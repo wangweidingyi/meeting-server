@@ -114,6 +114,9 @@ func TestNewFromConfigLeavesMQTTRuntimeDisabledWithoutBroker(t *testing.T) {
 			Port: 0,
 		},
 		MQTT: config.MQTTConfig{},
+		Database: config.DatabaseConfig{
+			URL: "postgres://meeting:secret@127.0.0.1:5432/meeting",
+		},
 	})
 
 	if application.MQTTRuntime != nil {
@@ -134,6 +137,9 @@ func TestNewFromConfigBuildsMQTTRuntimeWhenEmbeddedBrokerIsEnabled(t *testing.T)
 			ListenPort: 1883,
 			ClientID:   "meeting-server",
 		},
+		Database: config.DatabaseConfig{
+			URL: "postgres://meeting:secret@127.0.0.1:5432/meeting",
+		},
 	})
 
 	if application.MQTTRuntime == nil {
@@ -151,18 +157,25 @@ func TestNewFromConfigBuildsModelBackedMeetingPipelinesWhenConfigured(t *testing
 			Port: 0,
 		},
 		MQTT: config.MQTTConfig{},
+		Database: config.DatabaseConfig{
+			URL: "postgres://meeting:secret@127.0.0.1:5432/meeting",
+		},
 		AI: config.AIConfig{
-			STT: config.ModelProviderConfig{
-				Provider: "openai_compatible",
-				BaseURL:  "https://example.com/v1/audio/transcriptions",
-				APIKey:   "stt-key",
-				Model:    "sensevoice-large",
+			STT: config.STTProviderConfig{
+				Provider: "volcengine_streaming",
+				BaseURL:  "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
+				APIKey:   "stt-access-key",
+				Model:    "bigmodel",
+				Options: map[string]string{
+					"appKey":     "stt-app-key",
+					"resourceId": "volc.seedasr.sauc.duration",
+				},
 			},
 			LLM: config.ModelProviderConfig{
-				Provider: "openai_compatible",
-				BaseURL:  "https://example.com/v1",
-				APIKey:   "llm-key",
-				Model:    "qwen-meeting",
+				Provider: "deepseek",
+				BaseURL:  "https://api.deepseek.com/v1",
+				APIKey:   "deepseek-key",
+				Model:    "deepseek-chat",
 			},
 			TTS: config.SpeechProviderConfig{
 				Provider: "openai_compatible",
@@ -174,18 +187,34 @@ func TestNewFromConfigBuildsModelBackedMeetingPipelinesWhenConfigured(t *testing
 		},
 	})
 
-	if got := application.SummaryService.ProviderName(); got != "openai_compatible" {
+	if got := application.SummaryService.ProviderName(); got != "deepseek" {
 		t.Fatalf("unexpected summary provider %s", got)
 	}
-	if got := application.STTService.ProviderName(); got != "openai_compatible" {
+	if got := application.STTService.ProviderName(); got != "volcengine_streaming" {
 		t.Fatalf("unexpected stt provider %s", got)
 	}
-	if got := application.ActionItems.ProviderName(); got != "openai_compatible" {
+	if got := application.ActionItems.ProviderName(); got != "deepseek" {
 		t.Fatalf("unexpected action-items provider %s", got)
 	}
 	if got := application.TTSService.ProviderName(); got != "openai_compatible" {
 		t.Fatalf("unexpected tts provider %s", got)
 	}
+}
+
+func TestNewFromConfigPanicsWithoutDatabaseURL(t *testing.T) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("expected panic when database url is missing")
+		}
+	}()
+
+	NewFromConfig(config.Config{
+		UDP: config.UDPConfig{
+			Host: "127.0.0.1",
+			Port: 0,
+		},
+	})
 }
 
 func TestApplyAIConfigUpdatesRunningPipelines(t *testing.T) {
@@ -195,17 +224,21 @@ func TestApplyAIConfigUpdatesRunningPipelines(t *testing.T) {
 	})
 
 	application.ApplyAIConfig(config.AIConfig{
-		STT: config.ModelProviderConfig{
-			Provider: "openai_compatible",
-			BaseURL:  "https://example.com/v1/audio/transcriptions",
-			APIKey:   "stt-key",
-			Model:    "sensevoice-large",
+		STT: config.STTProviderConfig{
+			Provider: "volcengine_streaming",
+			BaseURL:  "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
+			APIKey:   "stt-access-key",
+			Model:    "bigmodel",
+			Options: map[string]string{
+				"appKey":     "stt-app-key",
+				"resourceId": "volc.seedasr.sauc.duration",
+			},
 		},
 		LLM: config.ModelProviderConfig{
-			Provider: "openai_compatible",
-			BaseURL:  "https://example.com/v1",
-			APIKey:   "llm-key",
-			Model:    "qwen-max",
+			Provider: "kimi",
+			BaseURL:  "https://api.moonshot.cn/v1",
+			APIKey:   "kimi-key",
+			Model:    "moonshot-v1-8k",
 		},
 		TTS: config.SpeechProviderConfig{
 			Provider: "openai_compatible",
@@ -216,13 +249,13 @@ func TestApplyAIConfigUpdatesRunningPipelines(t *testing.T) {
 		},
 	})
 
-	if got := application.STTService.ProviderName(); got != "openai_compatible" {
+	if got := application.STTService.ProviderName(); got != "volcengine_streaming" {
 		t.Fatalf("unexpected stt provider %s", got)
 	}
-	if got := application.SummaryService.ProviderName(); got != "openai_compatible" {
+	if got := application.SummaryService.ProviderName(); got != "kimi" {
 		t.Fatalf("unexpected summary provider %s", got)
 	}
-	if got := application.ActionItems.ProviderName(); got != "openai_compatible" {
+	if got := application.ActionItems.ProviderName(); got != "kimi" {
 		t.Fatalf("unexpected action-items provider %s", got)
 	}
 	if got := application.TTSService.ProviderName(); got != "openai_compatible" {
@@ -230,9 +263,65 @@ func TestApplyAIConfigUpdatesRunningPipelines(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotAutoBootstrapAdminFromConfig(t *testing.T) {
+	settingsService := admin.NewService(admin.NewMemoryStore(), config.AIConfig{
+		STT: config.STTProviderConfig{Provider: "stub"},
+		LLM: config.ModelProviderConfig{Provider: "stub"},
+		TTS: config.SpeechProviderConfig{Provider: "stub"},
+	}, func(config.AIConfig) {})
+	meetingStore := admin.NewMemoryMeetingStore()
+	userService := admin.NewUserService(admin.NewMemoryUserStore(), meetingStore)
+	authService := admin.NewAuthService(userService, admin.NewMemoryAuthStore())
+	meetingService := admin.NewMeetingService(meetingStore)
+
+	application := NewWithOptions(Options{
+		UDPHost:      "127.0.0.1",
+		UDPPort:      0,
+		HTTPHost:     "127.0.0.1",
+		HTTPPort:     0,
+		AdminService: settingsService,
+		UserService:  userService,
+		AuthService:  authService,
+		MeetingService: meetingService,
+		BootstrapAdmin: admin.BootstrapAdminConfig{
+			Username:    "root-admin",
+			Password:    "RootAdmin1234",
+			DisplayName: "超级管理员",
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- application.Run(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	user, found, err := userService.FindByUsername(context.Background(), "root-admin")
+	if err != nil {
+		t.Fatalf("find bootstrap admin: %v", err)
+	}
+	if found {
+		t.Fatalf("expected startup to avoid auto-creating bootstrap admin, got %+v", user)
+	}
+
+	cancel()
+	select {
+	case err := <-runErrCh:
+		if err != nil {
+			t.Fatalf("app run returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("app run did not stop after cancellation")
+	}
+}
+
 func TestRunStartsAdminHTTPServer(t *testing.T) {
 	adminService := admin.NewService(admin.NewMemoryStore(), config.AIConfig{
-		STT: config.ModelProviderConfig{Provider: "stub"},
+		STT: config.STTProviderConfig{Provider: "stub"},
 		LLM: config.ModelProviderConfig{Provider: "stub"},
 		TTS: config.SpeechProviderConfig{Provider: "stub"},
 	}, func(config.AIConfig) {})

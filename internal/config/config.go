@@ -7,11 +7,12 @@ import (
 )
 
 type Config struct {
-	UDP      UDPConfig      `json:"udp"`
-	MQTT     MQTTConfig     `json:"mqtt"`
-	HTTP     HTTPConfig     `json:"http"`
-	Database DatabaseConfig `json:"database"`
-	AI       AIConfig       `json:"ai"`
+	UDP            UDPConfig            `json:"udp"`
+	MQTT           MQTTConfig           `json:"mqtt"`
+	HTTP           HTTPConfig           `json:"http"`
+	Database       DatabaseConfig       `json:"database"`
+	AI             AIConfig             `json:"ai"`
+	BootstrapAdmin BootstrapAdminConfig `json:"bootstrapAdmin"`
 }
 
 type UDPConfig struct {
@@ -39,10 +40,24 @@ type DatabaseConfig struct {
 	URL string `json:"url"`
 }
 
+type BootstrapAdminConfig struct {
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	DisplayName string `json:"displayName"`
+}
+
 type AIConfig struct {
-	STT ModelProviderConfig  `json:"stt"`
+	STT STTProviderConfig    `json:"stt"`
 	LLM ModelProviderConfig  `json:"llm"`
 	TTS SpeechProviderConfig `json:"tts"`
+}
+
+type STTProviderConfig struct {
+	Provider string            `json:"provider"`
+	BaseURL  string            `json:"baseUrl"`
+	APIKey   string            `json:"apiKey"`
+	Model    string            `json:"model"`
+	Options  map[string]string `json:"options,omitempty"`
 }
 
 type ModelProviderConfig struct {
@@ -78,7 +93,7 @@ func Default() Config {
 			Port: 8090,
 		},
 		AI: AIConfig{
-			STT: ModelProviderConfig{
+			STT: STTProviderConfig{
 				Provider: "stub",
 			},
 			LLM: ModelProviderConfig{
@@ -120,6 +135,9 @@ func LoadFromEnv() (Config, error) {
 
 	if value := os.Getenv("MEETING_DATABASE_URL"); value != "" {
 		cfg.Database.URL = value
+	}
+	if cfg.Database.URL == "" {
+		return Config{}, fmt.Errorf("MEETING_DATABASE_URL is required")
 	}
 
 	if value := os.Getenv("MEETING_MQTT_EMBEDDED"); value != "" {
@@ -174,6 +192,20 @@ func LoadFromEnv() (Config, error) {
 	if value := os.Getenv("MEETING_STT_MODEL"); value != "" {
 		cfg.AI.STT.Model = value
 	}
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_APP_KEY", "appKey")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_RESOURCE_ID", "resourceId")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_LANGUAGE", "language")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_AUDIO_FORMAT", "audioFormat")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_AUDIO_CODEC", "audioCodec")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_SAMPLE_RATE", "sampleRate")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_BITS", "bits")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_CHANNELS", "channels")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_ENABLE_ITN", "enableItn")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_ENABLE_PUNC", "enablePunc")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_ENABLE_NONSTREAM", "enableNonstream")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_SHOW_UTTERANCES", "showUtterances")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_RESULT_TYPE", "resultType")
+	loadSTTOptionFromEnv(&cfg, "MEETING_STT_END_WINDOW_SIZE", "endWindowSize")
 
 	if value := os.Getenv("MEETING_LLM_PROVIDER"); value != "" {
 		cfg.AI.LLM.Provider = value
@@ -204,6 +236,16 @@ func LoadFromEnv() (Config, error) {
 		cfg.AI.TTS.Voice = value
 	}
 
+	if value := os.Getenv("MEETING_BOOTSTRAP_ADMIN_USERNAME"); value != "" {
+		cfg.BootstrapAdmin.Username = value
+	}
+	if value := os.Getenv("MEETING_BOOTSTRAP_ADMIN_PASSWORD"); value != "" {
+		cfg.BootstrapAdmin.Password = value
+	}
+	if value := os.Getenv("MEETING_BOOTSTRAP_ADMIN_DISPLAY_NAME"); value != "" {
+		cfg.BootstrapAdmin.DisplayName = value
+	}
+
 	return cfg, nil
 }
 
@@ -231,4 +273,13 @@ func (c Config) Summary() string {
 		databaseState,
 		mqttState,
 	)
+}
+
+func loadSTTOptionFromEnv(cfg *Config, envKey, optionKey string) {
+	if value := os.Getenv(envKey); value != "" {
+		if cfg.AI.STT.Options == nil {
+			cfg.AI.STT.Options = map[string]string{}
+		}
+		cfg.AI.STT.Options[optionKey] = value
+	}
 }

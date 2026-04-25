@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
+	"time"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/hooks/auth"
@@ -16,11 +18,17 @@ type EmbeddedBrokerConfig struct {
 }
 
 type EmbeddedBroker struct {
-	config EmbeddedBrokerConfig
+	config      EmbeddedBrokerConfig
+	mu          sync.RWMutex
+	address     string
+	listeningCh chan string
 }
 
 func NewEmbeddedBroker(config EmbeddedBrokerConfig) *EmbeddedBroker {
-	return &EmbeddedBroker{config: config}
+	return &EmbeddedBroker{
+		config:      config,
+		listeningCh: make(chan string, 1),
+	}
 }
 
 func (b *EmbeddedBroker) Run(ctx context.Context) error {
@@ -39,6 +47,8 @@ func (b *EmbeddedBroker) Run(ctx context.Context) error {
 		return err
 	}
 
+	b.markListening(listener.Addr().String())
+
 	go func() {
 		<-ctx.Done()
 		_ = server.Close()
@@ -49,4 +59,41 @@ func (b *EmbeddedBroker) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (b *EmbeddedBroker) WaitUntilListening(timeout time.Duration) string {
+	b.mu.RLock()
+	if b.address != "" {
+		address := b.address
+		b.mu.RUnlock()
+		return address
+	}
+	b.mu.RUnlock()
+
+	select {
+	case address := <-b.listeningCh:
+		b.mu.Lock()
+		if b.address == "" {
+			b.address = address
+		}
+		b.mu.Unlock()
+		return address
+	case <-time.After(timeout):
+		return ""
+	}
+}
+
+func (b *EmbeddedBroker) markListening(address string) {
+	b.mu.Lock()
+	if b.address != "" {
+		b.mu.Unlock()
+		return
+	}
+	b.address = address
+	b.mu.Unlock()
+
+	select {
+	case b.listeningCh <- address:
+	default:
+	}
 }

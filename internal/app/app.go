@@ -12,6 +12,7 @@ import (
 
 	"meeting-server/internal/admin"
 	"meeting-server/internal/config"
+	"meeting-server/internal/model/llmproviders"
 	openaicompat "meeting-server/internal/model/openai_compatible"
 	"meeting-server/internal/pipeline/action_items"
 	"meeting-server/internal/pipeline/stt"
@@ -48,6 +49,10 @@ type Options struct {
 	ActionItemsService *action_items.Service
 	TTSService         *tts.Service
 	AdminService       *admin.Service
+	UserService        *admin.UserService
+	AuthService        *admin.AuthService
+	MeetingService     *admin.MeetingService
+	BootstrapAdmin     admin.BootstrapAdminConfig
 }
 
 type App struct {
@@ -63,6 +68,10 @@ type App struct {
 	TTSService     *tts.Service
 	Publisher      RoutedMessagePublisher
 	AdminService   *admin.Service
+	UserService    *admin.UserService
+	AuthService    *admin.AuthService
+	MeetingService *admin.MeetingService
+	BootstrapAdmin admin.BootstrapAdminConfig
 	AdminHandler   http.Handler
 	HTTPServer     *http.Server
 	httpHost       string
@@ -81,6 +90,10 @@ func New() *App {
 }
 
 func NewFromConfig(cfg config.Config) *App {
+	if cfg.Database.URL == "" {
+		panic("MEETING_DATABASE_URL is required")
+	}
+
 	var mqttClient mqtttransport.BrokerClient
 	if cfg.MQTT.Enabled {
 		brokerURL := mqttBrokerURL(cfg.MQTT)
@@ -105,6 +118,11 @@ func NewFromConfig(cfg config.Config) *App {
 		SummaryService:     buildSummaryService(cfg),
 		ActionItemsService: buildActionItemsService(cfg),
 		TTSService:         buildTTSService(cfg),
+		BootstrapAdmin: admin.BootstrapAdminConfig{
+			Username:    cfg.BootstrapAdmin.Username,
+			Password:    cfg.BootstrapAdmin.Password,
+			DisplayName: cfg.BootstrapAdmin.DisplayName,
+		},
 	})
 	if cfg.MQTT.Embedded {
 		app.MQTTBroker = mqtttransport.NewEmbeddedBroker(mqtttransport.EmbeddedBrokerConfig{
@@ -113,21 +131,47 @@ func NewFromConfig(cfg config.Config) *App {
 		})
 	}
 
-	store := admin.Store(admin.NewMemoryStore())
-	var closeAdmin func()
-	if cfg.Database.URL != "" {
-		postgresStore := admin.NewPostgresStore(cfg.Database.URL)
-		store = postgresStore
-		closeAdmin = postgresStore.Close
-	}
+	var closeResources []func()
+	postgresStore := admin.NewPostgresStore(cfg.Database.URL)
+	store := admin.Store(postgresStore)
+	closeResources = append(closeResources, postgresStore.Close)
+
+	postgresMeetingStore := admin.NewPostgresMeetingStore(cfg.Database.URL)
+	meetingStore := admin.MeetingStore(postgresMeetingStore)
+	closeResources = append(closeResources, postgresMeetingStore.Close)
+
+	postgresUserStore := admin.NewPostgresUserStore(cfg.Database.URL)
+	userStore := admin.UserStore(postgresUserStore)
+	closeResources = append(closeResources, postgresUserStore.Close)
+
+	postgresAuthStore := admin.NewPostgresAuthStore(cfg.Database.URL)
+	authStore := admin.AuthStore(postgresAuthStore)
+	closeResources = append(closeResources, postgresAuthStore.Close)
 
 	adminService := admin.NewService(store, cfg.AI, func(next config.AIConfig) {
 		app.ApplyAIConfig(next)
 	})
+	userService := admin.NewUserService(userStore, meetingStore)
+	authService := admin.NewAuthService(userService, authStore)
+	meetingService := admin.NewMeetingService(meetingStore)
 
 	app.AdminService = adminService
-	app.AdminHandler = admin.NewHandler(adminService)
-	app.closeAdmin = closeAdmin
+	app.UserService = userService
+	app.AuthService = authService
+	app.MeetingService = meetingService
+	app.BootstrapAdmin = admin.BootstrapAdminConfig{
+		Username:    cfg.BootstrapAdmin.Username,
+		Password:    cfg.BootstrapAdmin.Password,
+		DisplayName: cfg.BootstrapAdmin.DisplayName,
+	}
+	app.AdminHandler = admin.NewHandler(adminService, userService, meetingService, authService)
+	app.closeAdmin = func() {
+		for _, closeFn := range closeResources {
+			if closeFn != nil {
+				closeFn()
+			}
+		}
+	}
 	app.httpHost = cfg.HTTP.Host
 	app.httpPort = cfg.HTTP.Port
 
@@ -193,7 +237,11 @@ func NewWithOptions(options Options) *App {
 		TTSService:     ttsService,
 		Publisher:      publisher,
 		AdminService:   options.AdminService,
-		AdminHandler:   adminHandler(options.AdminService),
+		UserService:    options.UserService,
+		AuthService:    options.AuthService,
+		MeetingService: options.MeetingService,
+		BootstrapAdmin: options.BootstrapAdmin,
+		AdminHandler:   adminHandler(options.AdminService, options.UserService, options.MeetingService, options.AuthService),
 		httpHost:       options.HTTPHost,
 		httpPort:       options.HTTPPort,
 	}
@@ -203,6 +251,21 @@ func (a *App) Run(ctx context.Context) error {
 	if a.AdminService != nil {
 		if err := a.AdminService.Bootstrap(ctx); err != nil {
 			return err
+		}
+		if a.UserService != nil {
+			if _, err := a.UserService.List(ctx); err != nil {
+				return err
+			}
+		}
+		if a.AuthService != nil {
+			if err := a.AuthService.EnsureReady(ctx); err != nil {
+				return err
+			}
+		}
+		if a.MeetingService != nil {
+			if _, err := a.MeetingService.List(ctx); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -229,6 +292,9 @@ func (a *App) Run(ctx context.Context) error {
 	if a.MQTTRuntime != nil {
 		if a.MQTTBroker != nil {
 			runComponent(a.MQTTBroker.Run)
+			if address := a.MQTTBroker.WaitUntilListening(5 * time.Second); address == "" {
+				return errors.New("embedded mqtt broker did not start listening")
+			}
 		}
 		runComponent(a.MQTTRuntime.Run)
 	}
@@ -257,7 +323,7 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 func (a *App) ApplyAIConfig(ai config.AIConfig) {
-	a.STTService.SetProvider(ai.STT.Provider, ai.STT.BaseURL, ai.STT.APIKey, ai.STT.Model)
+	a.STTService.SetConfig(ai.STT)
 	a.SummaryService.SetGenerator(summaryGenerator(ai.LLM))
 	a.ActionItems.SetExtractor(actionItemsExtractor(ai.LLM))
 	a.TTSService.SetSynthesizer(ttsSynthesizer(ai.TTS))
@@ -312,7 +378,7 @@ func (p MultiPublisher) Publish(messages []protocol.RoutedMessage) {
 
 func buildSTTService(cfg config.Config) *stt.Service {
 	service := stt.NewService()
-	service.SetProvider(cfg.AI.STT.Provider, cfg.AI.STT.BaseURL, cfg.AI.STT.APIKey, cfg.AI.STT.Model)
+	service.SetConfig(cfg.AI.STT)
 	return service
 }
 
@@ -344,27 +410,43 @@ func mqttBrokerURL(cfg config.MQTTConfig) string {
 }
 
 func summaryGenerator(cfg config.ModelProviderConfig) summary.Generator {
-	if cfg.Provider == "openai_compatible" {
-		return summary.NewOpenAICompatibleGenerator(&openaicompat.ChatClient{
-			BaseURL: cfg.BaseURL,
-			APIKey:  cfg.APIKey,
-			Model:   cfg.Model,
-		})
+	providerName, client, ok := llmproviders.NewChatClient(cfg)
+	if !ok {
+		return summary.StubGenerator{}
 	}
 
-	return summary.StubGenerator{}
+	switch providerName {
+	case "openai":
+		return summary.NewOpenAIGenerator(client)
+	case "deepseek":
+		return summary.NewDeepSeekGenerator(client)
+	case "kimi":
+		return summary.NewKimiGenerator(client)
+	case "openai_compatible":
+		return summary.NewOpenAICompatibleGenerator(client)
+	default:
+		return summary.StubGenerator{}
+	}
 }
 
 func actionItemsExtractor(cfg config.ModelProviderConfig) action_items.Extractor {
-	if cfg.Provider == "openai_compatible" {
-		return action_items.NewOpenAICompatibleExtractor(&openaicompat.ChatClient{
-			BaseURL: cfg.BaseURL,
-			APIKey:  cfg.APIKey,
-			Model:   cfg.Model,
-		})
+	providerName, client, ok := llmproviders.NewChatClient(cfg)
+	if !ok {
+		return action_items.StubExtractor{}
 	}
 
-	return action_items.StubExtractor{}
+	switch providerName {
+	case "openai":
+		return action_items.NewOpenAIExtractor(client)
+	case "deepseek":
+		return action_items.NewDeepSeekExtractor(client)
+	case "kimi":
+		return action_items.NewKimiExtractor(client)
+	case "openai_compatible":
+		return action_items.NewOpenAICompatibleExtractor(client)
+	default:
+		return action_items.StubExtractor{}
+	}
 }
 
 func ttsSynthesizer(cfg config.SpeechProviderConfig) tts.Synthesizer {
@@ -380,10 +462,15 @@ func ttsSynthesizer(cfg config.SpeechProviderConfig) tts.Synthesizer {
 	return tts.StubSynthesizer{}
 }
 
-func adminHandler(service *admin.Service) http.Handler {
-	if service == nil {
+func adminHandler(service *admin.Service, userService *admin.UserService, meetingService *admin.MeetingService, authService *admin.AuthService) http.Handler {
+	if service == nil && userService == nil && meetingService == nil && authService == nil {
 		return nil
 	}
 
-	return admin.NewHandler(service)
+	if service == nil {
+		service = admin.NewService(admin.NewMemoryStore(), config.AIConfig{}, func(config.AIConfig) {})
+		_ = service.Bootstrap(context.Background())
+	}
+
+	return admin.NewHandler(service, userService, meetingService, authService)
 }

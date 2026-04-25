@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"meeting-server/internal/config"
 	openaicompat "meeting-server/internal/model/openai_compatible"
 	"meeting-server/internal/protocol"
 )
@@ -23,11 +24,25 @@ type sessionState struct {
 	packetsSinceRecognize int
 }
 
+type StreamSession interface {
+	Consume(ctx context.Context, packet protocol.MixedAudioPacket) (protocol.TranscriptPayload, bool, error)
+	Flush(ctx context.Context, sessionID string) (protocol.TranscriptPayload, bool, error)
+	Close() error
+}
+
+type StreamFactory interface {
+	Name() string
+	NewSession(sessionID string) StreamSession
+}
+
 type Service struct {
-	mu           sync.Mutex
-	sessions     map[string]*sessionState
-	recognizer   Recognizer
-	triggerEvery int
+	mu             sync.Mutex
+	sessions       map[string]*sessionState
+	streamSessions map[string]StreamSession
+	recognizer     Recognizer
+	streamFactory  StreamFactory
+	providerName   string
+	triggerEvery   int
 }
 
 type Recognizer interface {
@@ -41,6 +56,17 @@ func WithRecognizer(recognizer Recognizer) Option {
 	return func(service *Service) {
 		if recognizer != nil {
 			service.recognizer = recognizer
+			service.streamFactory = nil
+			service.providerName = recognizer.Name()
+		}
+	}
+}
+
+func WithStreamFactory(factory StreamFactory) Option {
+	return func(service *Service) {
+		if factory != nil {
+			service.streamFactory = factory
+			service.providerName = factory.Name()
 		}
 	}
 }
@@ -55,44 +81,76 @@ func WithRecognitionTriggerPackets(triggerEvery int) Option {
 
 func NewService(options ...Option) *Service {
 	service := &Service{
-		sessions:     make(map[string]*sessionState),
-		recognizer:   StubRecognizer{},
-		triggerEvery: 5,
+		sessions:       make(map[string]*sessionState),
+		streamSessions: make(map[string]StreamSession),
+		recognizer:     StubRecognizer{},
+		providerName:   "stub",
+		triggerEvery:   5,
 	}
 
 	for _, option := range options {
 		option(service)
 	}
 
+	if service.providerName == "" {
+		service.providerName = service.recognizer.Name()
+	}
+
 	return service
 }
 
 func (s *Service) SetProvider(provider, baseURL, apiKey, model string) {
+	s.SetConfig(config.STTProviderConfig{
+		Provider: provider,
+		BaseURL:  baseURL,
+		APIKey:   apiKey,
+		Model:    model,
+	})
+}
+
+func (s *Service) SetConfig(cfg config.STTProviderConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if provider == "openai_compatible" {
-		s.recognizer = NewOpenAICompatibleRecognizer(&openaicompat.TranscriptionClient{
-			BaseURL: baseURL,
-			APIKey:  apiKey,
-			Model:   model,
-		})
-		return
+	for sessionID, streamSession := range s.streamSessions {
+		_ = streamSession.Close()
+		delete(s.streamSessions, sessionID)
 	}
+	s.sessions = make(map[string]*sessionState)
 
-	s.recognizer = StubRecognizer{}
+	switch cfg.Provider {
+	case "openai_compatible":
+		s.recognizer = NewOpenAICompatibleRecognizer(&openaicompat.TranscriptionClient{
+			BaseURL: cfg.BaseURL,
+			APIKey:  cfg.APIKey,
+			Model:   cfg.Model,
+		})
+		s.streamFactory = nil
+		s.providerName = "openai_compatible"
+	case "volcengine_streaming":
+		s.recognizer = StubRecognizer{}
+		s.streamFactory = NewVolcengineStreamingFactory(cfg)
+		s.providerName = "volcengine_streaming"
+	default:
+		s.recognizer = StubRecognizer{}
+		s.streamFactory = nil
+		s.providerName = "stub"
+	}
 }
 
 func (s *Service) ProviderName() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.recognizer.Name()
+	return s.providerName
 }
 
 func (s *Service) Consume(packet protocol.MixedAudioPacket) (protocol.TranscriptPayload, bool) {
 	if s.ProviderName() == "stub" {
 		return s.consumeStub(packet)
+	}
+	if s.hasStreamFactory() {
+		return s.consumeWithStreamSession(packet)
 	}
 
 	return s.consumeWithRecognizer(packet)
@@ -102,8 +160,18 @@ func (s *Service) Flush(sessionID string) (protocol.TranscriptPayload, bool) {
 	if s.ProviderName() == "stub" {
 		return s.flushStub(sessionID)
 	}
+	if s.hasStreamFactory() {
+		return s.flushWithStreamSession(sessionID)
+	}
 
 	return s.flushWithRecognizer(sessionID)
+}
+
+func (s *Service) hasStreamFactory() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.streamFactory != nil
 }
 
 func (s *Service) consumeStub(packet protocol.MixedAudioPacket) (protocol.TranscriptPayload, bool) {
@@ -273,6 +341,46 @@ func (s *Service) flushWithRecognizer(sessionID string) (protocol.TranscriptPayl
 		IsFinal:   true,
 		Revision:  revision,
 	}, true
+}
+
+func (s *Service) consumeWithStreamSession(packet protocol.MixedAudioPacket) (protocol.TranscriptPayload, bool) {
+	s.mu.Lock()
+	session, ok := s.streamSessions[packet.SessionID]
+	if !ok {
+		session = s.streamFactory.NewSession(packet.SessionID)
+		s.streamSessions[packet.SessionID] = session
+	}
+	s.mu.Unlock()
+
+	payload, ok, err := session.Consume(context.Background(), packet)
+	if err != nil {
+		return protocol.TranscriptPayload{}, false
+	}
+
+	return payload, ok
+}
+
+func (s *Service) flushWithStreamSession(sessionID string) (protocol.TranscriptPayload, bool) {
+	s.mu.Lock()
+	session, ok := s.streamSessions[sessionID]
+	if ok {
+		delete(s.streamSessions, sessionID)
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		return protocol.TranscriptPayload{}, false
+	}
+	defer func() {
+		_ = session.Close()
+	}()
+
+	payload, ok, err := session.Flush(context.Background(), sessionID)
+	if err != nil {
+		return protocol.TranscriptPayload{}, false
+	}
+
+	return payload, ok
 }
 
 func (s *Service) ensureState(sessionID string) *sessionState {

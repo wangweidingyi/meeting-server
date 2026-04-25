@@ -21,6 +21,12 @@ type PahoBrokerClient struct {
 }
 
 func NewPahoBrokerClient(options PahoClientOptions) *PahoBrokerClient {
+	return &PahoBrokerClient{
+		client: paho.NewClient(buildPahoClientOptions(options)),
+	}
+}
+
+func buildPahoClientOptions(options PahoClientOptions) *paho.ClientOptions {
 	clientOptions := paho.NewClientOptions()
 	clientOptions.AddBroker(options.BrokerURL)
 	clientOptions.SetClientID(options.ClientID)
@@ -28,15 +34,14 @@ func NewPahoBrokerClient(options PahoClientOptions) *PahoBrokerClient {
 	clientOptions.SetPassword(options.Password)
 	clientOptions.SetAutoReconnect(true)
 	clientOptions.SetConnectRetry(true)
-	clientOptions.SetOrderMatters(false)
+	// Control messages such as session/hello -> recording/start must be handled in-order.
+	clientOptions.SetOrderMatters(true)
 
 	if options.KeepAlive > 0 {
 		clientOptions.SetKeepAlive(options.KeepAlive)
 	}
 
-	return &PahoBrokerClient{
-		client: paho.NewClient(clientOptions),
-	}
+	return clientOptions
 }
 
 func NewPahoBrokerClientFromEnv() (*PahoBrokerClient, bool) {

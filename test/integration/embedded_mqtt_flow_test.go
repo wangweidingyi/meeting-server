@@ -36,12 +36,18 @@ func TestEmbeddedMQTTFlowBridgesControlAndRealtimeEvents(t *testing.T) {
 			Host: "127.0.0.1",
 			Port: 0,
 		},
+		Database: config.DatabaseConfig{
+			URL: "postgres://meeting:secret@127.0.0.1:5432/meeting",
+		},
 		AI: config.AIConfig{
-			STT: config.ModelProviderConfig{Provider: "stub"},
+			STT: config.STTProviderConfig{Provider: "stub"},
 			LLM: config.ModelProviderConfig{Provider: "stub"},
 			TTS: config.SpeechProviderConfig{Provider: "stub"},
 		},
 	})
+	application.AdminService = nil
+	application.AdminHandler = nil
+	application.MeetingService = nil
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -65,7 +71,7 @@ func TestEmbeddedMQTTFlowBridgesControlAndRealtimeEvents(t *testing.T) {
 	subscribeTopic(t, client, protocol.SummaryTopic("client-a", "session-1"), messages.handle)
 	subscribeTopic(t, client, protocol.ActionItemsTopic("client-a", "session-1"), messages.handle)
 
-	publishEnvelope(t, client, protocol.ControlTopic("client-a", "session-1"), map[string]any{
+	publishUntilReceived(t, client, messages, protocol.ControlTopic("client-a", "session-1"), map[string]any{
 		"version":   "v1",
 		"messageId": "hello-1",
 		"clientId":  "client-a",
@@ -74,9 +80,7 @@ func TestEmbeddedMQTTFlowBridgesControlAndRealtimeEvents(t *testing.T) {
 		"payload": map[string]any{
 			"title": "embedded mqtt integration",
 		},
-	})
-
-	messages.waitForType(t, protocol.TypeSessionHello)
+	}, protocol.TypeSessionHello)
 
 	publishEnvelope(t, client, protocol.ControlTopic("client-a", "session-1"), map[string]any{
 		"version":   "v1",
@@ -186,6 +190,13 @@ func (c *brokerMessageCollector) waitForType(t *testing.T, messageType string) {
 	t.Fatalf("timed out waiting for mqtt message type %s", messageType)
 }
 
+func (c *brokerMessageCollector) hasType(messageType string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return len(c.received[messageType]) > 0
+}
+
 func connectIntegrationMQTTClient(
 	t *testing.T,
 	port int,
@@ -203,7 +214,7 @@ func connectIntegrationMQTTClient(
 
 		client := paho.NewClient(options)
 		token := client.Connect()
-		if token.WaitTimeout(500 * time.Millisecond) && token.Error() == nil {
+		if token.WaitTimeout(500*time.Millisecond) && token.Error() == nil {
 			return client
 		}
 
@@ -247,6 +258,28 @@ func publishEnvelope(t *testing.T, client paho.Client, topic string, payload map
 	if err := token.Error(); err != nil {
 		t.Fatalf("publish %s: %v", topic, err)
 	}
+}
+
+func publishUntilReceived(
+	t *testing.T,
+	client paho.Client,
+	collector *brokerMessageCollector,
+	topic string,
+	payload map[string]any,
+	messageType string,
+) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		publishEnvelope(t, client, topic, payload)
+		if collector.hasType(messageType) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for mqtt message type %s", messageType)
 }
 
 func reserveTCPPort(t *testing.T) int {

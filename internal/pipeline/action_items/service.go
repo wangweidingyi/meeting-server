@@ -147,15 +147,44 @@ func (StubExtractor) mustExtract(transcriptText string, existingItems []string) 
 }
 
 type OpenAICompatibleExtractor struct {
+	providerName string
 	client *openaicompat.ChatClient
 }
 
 func NewOpenAICompatibleExtractor(client *openaicompat.ChatClient) *OpenAICompatibleExtractor {
-	return &OpenAICompatibleExtractor{client: client}
+	return &OpenAICompatibleExtractor{
+		providerName: "openai_compatible",
+		client:       client,
+	}
+}
+
+func NewOpenAIExtractor(client *openaicompat.ChatClient) *OpenAICompatibleExtractor {
+	return &OpenAICompatibleExtractor{
+		providerName: "openai",
+		client:       client,
+	}
+}
+
+func NewDeepSeekExtractor(client *openaicompat.ChatClient) *OpenAICompatibleExtractor {
+	return &OpenAICompatibleExtractor{
+		providerName: "deepseek",
+		client:       client,
+	}
+}
+
+func NewKimiExtractor(client *openaicompat.ChatClient) *OpenAICompatibleExtractor {
+	return &OpenAICompatibleExtractor{
+		providerName: "kimi",
+		client:       client,
+	}
 }
 
 func (e *OpenAICompatibleExtractor) Name() string {
-	return "openai_compatible"
+	if e.providerName == "" {
+		return "openai_compatible"
+	}
+
+	return e.providerName
 }
 
 func (e *OpenAICompatibleExtractor) Extract(ctx context.Context, sessionID string, transcriptText string, existingItems []string, isFinal bool) ([]string, error) {

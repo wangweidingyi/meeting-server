@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"meeting-server/internal/config"
+	"meeting-server/internal/model/llmproviders"
 	openaicompat "meeting-server/internal/model/openai_compatible"
+	"meeting-server/internal/pipeline/stt"
 )
 
 type RuntimeTester struct{}
@@ -25,7 +27,7 @@ func (t *RuntimeTester) Test(ctx context.Context, ai config.AIConfig) (TestSetti
 	}, nil
 }
 
-func testSTTProvider(ctx context.Context, provider config.ModelProviderConfig) ProviderTestResult {
+func testSTTProvider(ctx context.Context, provider config.STTProviderConfig) ProviderTestResult {
 	startedAt := time.Now()
 	result := ProviderTestResult{Provider: provider.Provider}
 
@@ -46,6 +48,14 @@ func testSTTProvider(ctx context.Context, provider config.ModelProviderConfig) P
 		}
 		result.OK = true
 		result.Message = "transcription ok"
+	case "volcengine_streaming":
+		client := stt.NewVolcengineStreamingClient(provider)
+		if err := client.SmokeTest(ctx); err != nil {
+			result.Message = err.Error()
+			break
+		}
+		result.OK = true
+		result.Message = "volcengine streaming handshake ok"
 	default:
 		result.Message = fmt.Sprintf("unsupported stt provider %q", provider.Provider)
 	}
@@ -62,12 +72,14 @@ func testLLMProvider(ctx context.Context, provider config.ModelProviderConfig) P
 	case "stub":
 		result.OK = true
 		result.Message = "stub provider ready"
-	case "openai_compatible":
-		client := &openaicompat.ChatClient{
-			BaseURL: provider.BaseURL,
-			APIKey:  provider.APIKey,
-			Model:   provider.Model,
+	default:
+		providerName, client, ok := llmproviders.NewChatClient(provider)
+		if !ok {
+			result.Message = fmt.Sprintf("unsupported llm provider %q", provider.Provider)
+			result.LatencyMS = time.Since(startedAt).Milliseconds()
+			return result
 		}
+		result.Provider = providerName
 		var response struct {
 			OK bool `json:"ok"`
 		}
@@ -87,8 +99,6 @@ func testLLMProvider(ctx context.Context, provider config.ModelProviderConfig) P
 		}
 		result.OK = true
 		result.Message = "chat completion ok"
-	default:
-		result.Message = fmt.Sprintf("unsupported llm provider %q", provider.Provider)
 	}
 
 	result.LatencyMS = time.Since(startedAt).Milliseconds()
