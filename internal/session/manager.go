@@ -9,6 +9,7 @@ import (
 	"meeting-server/internal/pipeline/stt"
 	"meeting-server/internal/pipeline/summary"
 	"meeting-server/internal/protocol"
+	"meeting-server/internal/runtime/transcripts"
 )
 
 type Options struct {
@@ -17,6 +18,16 @@ type Options struct {
 	STTService         *stt.Service
 	SummaryService     *summary.Service
 	ActionItemsService *action_items.Service
+	TranscriptStore    TranscriptStore
+	AnalysisScheduler  AnalysisScheduler
+}
+
+type TranscriptStore interface {
+	UpsertSnapshot(snapshot transcripts.Snapshot) error
+}
+
+type AnalysisScheduler interface {
+	Schedule(clientID, sessionID string, isFinal bool)
 }
 
 type HelloRequest struct {
@@ -50,6 +61,8 @@ type Manager struct {
 	sttService         *stt.Service
 	summaryService     *summary.Service
 	actionItemsService *action_items.Service
+	transcriptStore    TranscriptStore
+	analysisScheduler  AnalysisScheduler
 }
 
 type SessionState struct {
@@ -82,6 +95,8 @@ func NewManager(options Options) *Manager {
 		sttService:         sttService,
 		summaryService:     summaryService,
 		actionItemsService: actionItemsService,
+		transcriptStore:    options.TranscriptStore,
+		analysisScheduler:  options.AnalysisScheduler,
 	}
 }
 
@@ -143,31 +158,18 @@ func (m *Manager) StopRecording(sessionID string) ([]protocol.RoutedMessage, err
 		return nil, err
 	}
 
-	messages := make([]protocol.RoutedMessage, 0, 4)
-
-	actionResult, hasActionItems := m.actionItemsService.Flush(sessionID)
-	if hasActionItems {
-		messages = append(messages, protocol.RoutedMessage{
-			Topic:   protocol.ActionItemsTopic(session.ClientID, session.SessionID),
-			Type:    protocol.TypeActionItemFinal,
-			Payload: toActionItemsPayload(actionResult),
-		})
-	}
-
-	if summaryResult, ok := m.summaryService.Flush(sessionID, actionResult.Items); ok {
-		messages = append(messages, protocol.RoutedMessage{
-			Topic:   protocol.SummaryTopic(session.ClientID, session.SessionID),
-			Type:    protocol.TypeSummaryFinal,
-			Payload: toSummaryPayload(summaryResult),
-		})
-	}
+	messages := make([]protocol.RoutedMessage, 0, 2)
 
 	if transcriptResult, ok := m.sttService.Flush(sessionID); ok {
+		if err := m.persistTranscriptSnapshot(sessionID, transcriptResult); err != nil {
+			return nil, err
+		}
 		messages = append(messages, protocol.RoutedMessage{
 			Topic:   protocol.SttTopic(session.ClientID, session.SessionID),
 			Type:    protocol.TypeSTTFinal,
 			Payload: transcriptResult,
 		})
+		m.scheduleAnalysis(session.ClientID, session.SessionID, true)
 	}
 
 	messages = append(messages, protocol.RoutedMessage{
@@ -219,25 +221,16 @@ func (m *Manager) HandleMixedAudio(packet protocol.MixedAudioPacket) ([]protocol
 	if !ok {
 		return nil, nil
 	}
-
-	actionItemsResult := m.actionItemsService.Consume(packet.SessionID, transcriptResult.Text)
-	summaryResult := m.summaryService.Consume(packet.SessionID, transcriptResult.Text, actionItemsResult.Items)
+	if err := m.persistTranscriptSnapshot(packet.SessionID, transcriptResult); err != nil {
+		return nil, err
+	}
+	m.scheduleAnalysis(packet.ClientID, packet.SessionID, false)
 
 	return []protocol.RoutedMessage{
 		{
 			Topic:   protocol.SttTopic(packet.ClientID, packet.SessionID),
 			Type:    protocol.TypeSTTDelta,
 			Payload: transcriptResult,
-		},
-		{
-			Topic:   protocol.SummaryTopic(packet.ClientID, packet.SessionID),
-			Type:    protocol.TypeSummaryDelta,
-			Payload: toSummaryPayload(summaryResult),
-		},
-		{
-			Topic:   protocol.ActionItemsTopic(packet.ClientID, packet.SessionID),
-			Type:    protocol.TypeActionItemDelta,
-			Payload: toActionItemsPayload(actionItemsResult),
 		},
 	}, nil
 }
@@ -287,6 +280,30 @@ func (m *Manager) sessionForIngest(sessionID string) (*SessionState, error) {
 	}
 
 	return session, nil
+}
+
+func (m *Manager) persistTranscriptSnapshot(sessionID string, transcript protocol.TranscriptPayload) error {
+	if m.transcriptStore == nil {
+		return nil
+	}
+
+	return m.transcriptStore.UpsertSnapshot(transcripts.Snapshot{
+		MeetingID: sessionID,
+		SegmentID: transcript.SegmentID,
+		StartMS:   transcript.StartMS,
+		EndMS:     transcript.EndMS,
+		Text:      transcript.Text,
+		IsFinal:   transcript.IsFinal,
+		Revision:  transcript.Revision,
+	})
+}
+
+func (m *Manager) scheduleAnalysis(clientID, sessionID string, isFinal bool) {
+	if m.analysisScheduler == nil {
+		return
+	}
+
+	m.analysisScheduler.Schedule(clientID, sessionID, isFinal)
 }
 
 func toSummaryPayload(result summary.Result) protocol.SummaryPayload {

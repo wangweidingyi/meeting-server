@@ -31,7 +31,7 @@ func (r *fakeRecognizer) Recognize(_ context.Context, _ string, audio []byte, is
 	return r.texts[r.calls-1], nil
 }
 
-func TestOpenAICompatibleRecognizerProducesRealtimeDeltaAndFinalTranscript(t *testing.T) {
+func TestOpenAICompatibleRecognizerProducesRealtimeTranscriptSnapshots(t *testing.T) {
 	recognizer := &fakeRecognizer{
 		name:  "openai_compatible",
 		texts: []string{"大家好", "大家好 今天讨论预算", "大家好 今天讨论预算"},
@@ -53,6 +53,9 @@ func TestOpenAICompatibleRecognizerProducesRealtimeDeltaAndFinalTranscript(t *te
 	if firstDelta.Text != "大家好" {
 		t.Fatalf("unexpected first delta %q", firstDelta.Text)
 	}
+	if firstDelta.SegmentID != "session-1-transcript" {
+		t.Fatalf("unexpected first segment id %q", firstDelta.SegmentID)
+	}
 
 	if _, ok := service.Consume(testPacket(3, 400)); ok {
 		t.Fatal("expected third packet to stay buffered")
@@ -62,8 +65,14 @@ func TestOpenAICompatibleRecognizerProducesRealtimeDeltaAndFinalTranscript(t *te
 	if !ok {
 		t.Fatal("expected fourth packet to emit second delta")
 	}
-	if secondDelta.Text != "今天讨论预算" {
+	if secondDelta.Text != "大家好 今天讨论预算" {
 		t.Fatalf("unexpected second delta %q", secondDelta.Text)
+	}
+	if secondDelta.SegmentID != firstDelta.SegmentID {
+		t.Fatalf("expected second revision to reuse segment id, got %q vs %q", secondDelta.SegmentID, firstDelta.SegmentID)
+	}
+	if secondDelta.Revision <= firstDelta.Revision {
+		t.Fatalf("expected second revision to increase, got %d after %d", secondDelta.Revision, firstDelta.Revision)
 	}
 
 	finalPayload, ok := service.Flush("session-1")
@@ -75,6 +84,12 @@ func TestOpenAICompatibleRecognizerProducesRealtimeDeltaAndFinalTranscript(t *te
 	}
 	if finalPayload.Text != "大家好 今天讨论预算" {
 		t.Fatalf("unexpected final transcript %q", finalPayload.Text)
+	}
+	if finalPayload.SegmentID != firstDelta.SegmentID {
+		t.Fatalf("expected final transcript to reuse segment id, got %q vs %q", finalPayload.SegmentID, firstDelta.SegmentID)
+	}
+	if finalPayload.Revision <= secondDelta.Revision {
+		t.Fatalf("expected final revision to increase, got %d after %d", finalPayload.Revision, secondDelta.Revision)
 	}
 	if recognizer.calls != 3 {
 		t.Fatalf("expected 3 recognizer calls, got %d", recognizer.calls)

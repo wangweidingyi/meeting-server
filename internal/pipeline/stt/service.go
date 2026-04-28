@@ -17,7 +17,6 @@ type sessionState struct {
 	nextRevision          uint64
 	firstStartMS          uint64
 	lastEndMS             uint64
-	lastDeltaEndMS        uint64
 	chunks                []string
 	cumulativePCM         []byte
 	cumulativeTranscript  string
@@ -192,12 +191,13 @@ func (s *Service) consumeStub(packet protocol.MixedAudioPacket) (protocol.Transc
 
 	text := fmt.Sprintf("[stub-stt] chunk-%d bytes=%d", packet.Sequence, len(packet.Payload))
 	state.chunks = append(state.chunks, text)
+	fullTranscript := strings.Join(state.chunks, " ")
 
 	return protocol.TranscriptPayload{
-		SegmentID: fmt.Sprintf("%s-%d", packet.SessionID, packet.Sequence),
-		StartMS:   packet.StartedAtMS,
+		SegmentID: liveTranscriptSegmentID(packet.SessionID),
+		StartMS:   state.firstStartMS,
 		EndMS:     state.lastEndMS,
-		Text:      text,
+		Text:      fullTranscript,
 		IsFinal:   false,
 		Revision:  state.nextRevision,
 	}, true
@@ -214,7 +214,7 @@ func (s *Service) flushStub(sessionID string) (protocol.TranscriptPayload, bool)
 
 	state.nextRevision++
 	payload := protocol.TranscriptPayload{
-		SegmentID: fmt.Sprintf("%s-final", sessionID),
+		SegmentID: liveTranscriptSegmentID(sessionID),
 		StartMS:   state.firstStartMS,
 		EndMS:     state.lastEndMS,
 		Text:      strings.Join(state.chunks, " "),
@@ -244,7 +244,6 @@ func (s *Service) consumeWithRecognizer(packet protocol.MixedAudioPacket) (proto
 	audio := append([]byte(nil), state.cumulativePCM...)
 	previousTranscript := state.cumulativeTranscript
 	firstStartMS := state.firstStartMS
-	lastDeltaEndMS := state.lastDeltaEndMS
 	lastEndMS := state.lastEndMS
 	recognizer := s.recognizer
 	s.mu.Unlock()
@@ -263,8 +262,8 @@ func (s *Service) consumeWithRecognizer(packet protocol.MixedAudioPacket) (proto
 		return protocol.TranscriptPayload{}, false
 	}
 
-	delta := transcriptDelta(previousTranscript, text)
-	if delta == "" {
+	text = strings.TrimSpace(text)
+	if text == "" || text == strings.TrimSpace(previousTranscript) {
 		s.mu.Lock()
 		state = s.ensureState(packet.SessionID)
 		state.cumulativeTranscript = text
@@ -280,18 +279,12 @@ func (s *Service) consumeWithRecognizer(packet protocol.MixedAudioPacket) (proto
 	state.nextRevision++
 	state.cumulativeTranscript = text
 	state.packetsSinceRecognize = 0
-	state.lastDeltaEndMS = lastEndMS
-
-	startMS := firstStartMS
-	if lastDeltaEndMS != 0 {
-		startMS = lastDeltaEndMS
-	}
 
 	return protocol.TranscriptPayload{
-		SegmentID: fmt.Sprintf("%s-%d", packet.SessionID, state.nextRevision),
-		StartMS:   startMS,
+		SegmentID: liveTranscriptSegmentID(packet.SessionID),
+		StartMS:   firstStartMS,
 		EndMS:     lastEndMS,
-		Text:      delta,
+		Text:      text,
 		IsFinal:   false,
 		Revision:  state.nextRevision,
 	}, true
@@ -334,7 +327,7 @@ func (s *Service) flushWithRecognizer(sessionID string) (protocol.TranscriptPayl
 	delete(s.sessions, sessionID)
 
 	return protocol.TranscriptPayload{
-		SegmentID: fmt.Sprintf("%s-final", sessionID),
+		SegmentID: liveTranscriptSegmentID(sessionID),
 		StartMS:   firstStartMS,
 		EndMS:     lastEndMS,
 		Text:      text,
@@ -419,20 +412,8 @@ func (r *OpenAICompatibleRecognizer) Recognize(ctx context.Context, _ string, wa
 	return r.client.Recognize(ctx, wave)
 }
 
-func transcriptDelta(previous, current string) string {
-	trimmedPrevious := strings.TrimSpace(previous)
-	trimmedCurrent := strings.TrimSpace(current)
-	if trimmedCurrent == "" {
-		return ""
-	}
-	if trimmedPrevious == "" {
-		return trimmedCurrent
-	}
-	if strings.HasPrefix(trimmedCurrent, trimmedPrevious) {
-		return strings.TrimSpace(strings.TrimPrefix(trimmedCurrent, trimmedPrevious))
-	}
-
-	return trimmedCurrent
+func liveTranscriptSegmentID(sessionID string) string {
+	return fmt.Sprintf("%s-transcript", sessionID)
 }
 
 func encodePCM16MonoWave(pcm []byte, sampleRateHz uint32, channels uint16) []byte {

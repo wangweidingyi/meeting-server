@@ -3,6 +3,7 @@ package integration_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"strconv"
 	"sync"
@@ -12,38 +13,27 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 
 	"meeting-server/internal/app"
-	"meeting-server/internal/config"
 	"meeting-server/internal/protocol"
+	mqtttransport "meeting-server/internal/transport/mqtt"
 )
 
 func TestEmbeddedMQTTFlowBridgesControlAndRealtimeEvents(t *testing.T) {
 	mqttPort := reserveTCPPort(t)
 	udpPort := reserveUDPPort(t)
 
-	application := app.NewFromConfig(config.Config{
-		UDP: config.UDPConfig{
+	application := app.NewWithOptions(app.Options{
+		UDPHost:  "127.0.0.1",
+		UDPPort:  udpPort,
+		HTTPHost: "127.0.0.1",
+		HTTPPort: 0,
+		MQTTBroker: mqtttransport.NewEmbeddedBroker(mqtttransport.EmbeddedBrokerConfig{
 			Host: "127.0.0.1",
-			Port: udpPort,
-		},
-		MQTT: config.MQTTConfig{
-			Enabled:    true,
-			Embedded:   true,
-			ListenHost: "127.0.0.1",
-			ListenPort: mqttPort,
-			ClientID:   "meeting-server-integration",
-		},
-		HTTP: config.HTTPConfig{
-			Host: "127.0.0.1",
-			Port: 0,
-		},
-		Database: config.DatabaseConfig{
-			URL: "postgres://meeting:secret@127.0.0.1:5432/meeting",
-		},
-		AI: config.AIConfig{
-			STT: config.STTProviderConfig{Provider: "stub"},
-			LLM: config.ModelProviderConfig{Provider: "stub"},
-			TTS: config.SpeechProviderConfig{Provider: "stub"},
-		},
+			Port: mqttPort,
+		}),
+		MQTTClient: mqtttransport.NewPahoBrokerClient(mqtttransport.PahoClientOptions{
+			BrokerURL: fmt.Sprintf("tcp://127.0.0.1:%d", mqttPort),
+			ClientID:  "meeting-server-integration",
+		}),
 	})
 	application.AdminService = nil
 	application.AdminHandler = nil

@@ -72,7 +72,7 @@ func (s *Service) SetExtractor(extractor Extractor) {
 	s.extractor = extractor
 }
 
-func (s *Service) Consume(sessionID, transcriptText string) Result {
+func (s *Service) Generate(sessionID, transcriptText string, isFinal bool) Result {
 	s.mu.Lock()
 	state := s.ensureState(sessionID)
 	state.version++
@@ -80,28 +80,36 @@ func (s *Service) Consume(sessionID, transcriptText string) Result {
 	existingItems := cloneStrings(state.items)
 	s.mu.Unlock()
 
-	items, err := s.extractor.Extract(context.Background(), sessionID, transcriptText, existingItems, false)
+	items, err := s.extractor.Extract(context.Background(), sessionID, transcriptText, existingItems, isFinal)
 	if err != nil {
 		items = StubExtractor{}.mustExtract(transcriptText, existingItems)
 	}
 
 	s.mu.Lock()
-	state = s.ensureState(sessionID)
-	state.items = cloneStrings(items)
+	if isFinal {
+		delete(s.sessions, sessionID)
+	} else {
+		state = s.ensureState(sessionID)
+		state.items = cloneStrings(items)
+	}
 	s.mu.Unlock()
 
 	return Result{
 		Version:   version,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		Items:     cloneStrings(items),
-		IsFinal:   false,
+		IsFinal:   isFinal,
 	}
+}
+
+func (s *Service) Consume(sessionID, transcriptText string) Result {
+	return s.Generate(sessionID, transcriptText, false)
 }
 
 func (s *Service) Flush(sessionID string) (Result, bool) {
 	s.mu.Lock()
 	state, ok := s.sessions[sessionID]
-	if !ok || len(state.items) == 0 {
+	if !ok {
 		s.mu.Unlock()
 		return Result{}, false
 	}
@@ -148,7 +156,7 @@ func (StubExtractor) mustExtract(transcriptText string, existingItems []string) 
 
 type OpenAICompatibleExtractor struct {
 	providerName string
-	client *openaicompat.ChatClient
+	client       *openaicompat.ChatClient
 }
 
 func NewOpenAICompatibleExtractor(client *openaicompat.ChatClient) *OpenAICompatibleExtractor {

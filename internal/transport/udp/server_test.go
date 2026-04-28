@@ -49,28 +49,14 @@ func TestHandleMixedAudioPublishesRealtimeDeltaEvents(t *testing.T) {
 	}
 
 	foundTranscriptDelta := false
-	foundSummaryDelta := false
-	foundActionItemDelta := false
-
 	for _, event := range events {
-		switch event.Type {
-		case protocol.TypeSTTDelta:
+		if event.Type == protocol.TypeSTTDelta {
 			foundTranscriptDelta = true
-		case protocol.TypeSummaryDelta:
-			foundSummaryDelta = true
-		case protocol.TypeActionItemDelta:
-			foundActionItemDelta = true
 		}
 	}
 
 	if !foundTranscriptDelta {
 		t.Fatal("expected stt_delta event")
-	}
-	if !foundSummaryDelta {
-		t.Fatal("expected summary_delta event")
-	}
-	if !foundActionItemDelta {
-		t.Fatal("expected action_item_delta event")
 	}
 }
 
@@ -252,27 +238,14 @@ func assertRealtimeTypes(t *testing.T, events []protocol.RoutedMessage) {
 	t.Helper()
 
 	foundTranscriptDelta := false
-	foundSummaryDelta := false
-	foundActionItemDelta := false
 
 	for _, event := range events {
-		switch event.Type {
-		case protocol.TypeSTTDelta:
+		if event.Type == protocol.TypeSTTDelta {
 			foundTranscriptDelta = true
-		case protocol.TypeSummaryDelta:
-			foundSummaryDelta = true
-		case protocol.TypeActionItemDelta:
-			foundActionItemDelta = true
 		}
 	}
 
 	if !foundTranscriptDelta {
 		t.Fatal("expected stt_delta event")
-	}
-	if !foundSummaryDelta {
-		t.Fatal("expected summary_delta event")
-	}
-	if !foundActionItemDelta {
-		t.Fatal("expected action_item_delta event")
 	}
 }

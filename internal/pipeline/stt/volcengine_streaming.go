@@ -103,7 +103,6 @@ type volcengineStreamingSession struct {
 	nextRevision         uint64
 	firstStartMS         uint64
 	lastEndMS            uint64
-	lastDeltaEndMS       uint64
 }
 
 func (s *volcengineStreamingSession) Consume(ctx context.Context, packet protocol.MixedAudioPacket) (protocol.TranscriptPayload, bool, error) {
@@ -136,7 +135,7 @@ func (s *volcengineStreamingSession) Consume(ctx context.Context, packet protoco
 		return protocol.TranscriptPayload{}, false, nil
 	}
 
-	return s.emitDelta(response.Text)
+	return s.emitSnapshot(response.Text)
 }
 
 func (s *volcengineStreamingSession) Flush(ctx context.Context, sessionID string) (protocol.TranscriptPayload, bool, error) {
@@ -170,7 +169,7 @@ func (s *volcengineStreamingSession) Flush(ctx context.Context, sessionID string
 
 	s.nextRevision++
 	return protocol.TranscriptPayload{
-		SegmentID: fmt.Sprintf("%s-final", sessionID),
+		SegmentID: liveTranscriptSegmentID(sessionID),
 		StartMS:   s.firstStartMS,
 		EndMS:     s.lastEndMS,
 		Text:      text,
@@ -285,30 +284,24 @@ func (s *volcengineStreamingSession) readAvailableResponses(wait time.Duration) 
 	}
 }
 
-func (s *volcengineStreamingSession) emitDelta(text string) (protocol.TranscriptPayload, bool, error) {
+func (s *volcengineStreamingSession) emitSnapshot(text string) (protocol.TranscriptPayload, bool, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return protocol.TranscriptPayload{}, false, nil
 	}
 
-	delta := transcriptDelta(s.cumulativeTranscript, text)
-	s.cumulativeTranscript = text
-	if delta == "" {
+	if text == strings.TrimSpace(s.cumulativeTranscript) {
 		return protocol.TranscriptPayload{}, false, nil
 	}
+	s.cumulativeTranscript = text
 
 	s.nextRevision++
-	startMS := s.firstStartMS
-	if s.lastDeltaEndMS != 0 {
-		startMS = s.lastDeltaEndMS
-	}
-	s.lastDeltaEndMS = s.lastEndMS
 
 	return protocol.TranscriptPayload{
-		SegmentID: fmt.Sprintf("%s-%d", s.sessionID, s.nextRevision),
-		StartMS:   startMS,
+		SegmentID: liveTranscriptSegmentID(s.sessionID),
+		StartMS:   s.firstStartMS,
 		EndMS:     s.lastEndMS,
-		Text:      delta,
+		Text:      text,
 		IsFinal:   false,
 		Revision:  s.nextRevision,
 	}, true, nil

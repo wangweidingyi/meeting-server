@@ -275,13 +275,13 @@ func TestRunDoesNotAutoBootstrapAdminFromConfig(t *testing.T) {
 	meetingService := admin.NewMeetingService(meetingStore)
 
 	application := NewWithOptions(Options{
-		UDPHost:      "127.0.0.1",
-		UDPPort:      0,
-		HTTPHost:     "127.0.0.1",
-		HTTPPort:     0,
-		AdminService: settingsService,
-		UserService:  userService,
-		AuthService:  authService,
+		UDPHost:        "127.0.0.1",
+		UDPPort:        0,
+		HTTPHost:       "127.0.0.1",
+		HTTPPort:       0,
+		AdminService:   settingsService,
+		UserService:    userService,
+		AuthService:    authService,
 		MeetingService: meetingService,
 		BootstrapAdmin: admin.BootstrapAdminConfig{
 			Username:    "root-admin",
@@ -483,24 +483,15 @@ func TestRunBridgesMQTTControlAndUDPRuntimeToBroker(t *testing.T) {
 func assertRealtimeMessages(t *testing.T, messages []protocol.RoutedMessage) {
 	t.Helper()
 
-	var (
-		foundTranscript bool
-		foundSummary    bool
-		foundActionItem bool
-	)
+	foundTranscript := false
 
 	for _, message := range messages {
-		switch message.Type {
-		case protocol.TypeSTTDelta:
+		if message.Type == protocol.TypeSTTDelta {
 			foundTranscript = true
-		case protocol.TypeSummaryDelta:
-			foundSummary = true
-		case protocol.TypeActionItemDelta:
-			foundActionItem = true
 		}
 	}
 
-	if !foundTranscript || !foundSummary || !foundActionItem {
+	if !foundTranscript {
 		t.Fatalf("unexpected realtime message set: %+v", messages)
 	}
 }

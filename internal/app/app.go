@@ -19,6 +19,8 @@ import (
 	"meeting-server/internal/pipeline/summary"
 	"meeting-server/internal/pipeline/tts"
 	"meeting-server/internal/protocol"
+	analysisruntime "meeting-server/internal/runtime/analysis"
+	transcriptruntime "meeting-server/internal/runtime/transcripts"
 	"meeting-server/internal/session"
 	mqtttransport "meeting-server/internal/transport/mqtt"
 	udptransport "meeting-server/internal/transport/udp"
@@ -48,6 +50,7 @@ type Options struct {
 	SummaryService     *summary.Service
 	ActionItemsService *action_items.Service
 	TTSService         *tts.Service
+	TranscriptStore    transcriptruntime.Store
 	AdminService       *admin.Service
 	UserService        *admin.UserService
 	AuthService        *admin.AuthService
@@ -56,28 +59,30 @@ type Options struct {
 }
 
 type App struct {
-	mu             sync.RWMutex
-	SessionManager *session.Manager
-	MQTTServer     *mqtttransport.Server
-	MQTTRuntime    *mqtttransport.Runtime
-	MQTTBroker     *mqtttransport.EmbeddedBroker
-	UDPServer      *udptransport.Server
-	STTService     *stt.Service
-	SummaryService *summary.Service
-	ActionItems    *action_items.Service
-	TTSService     *tts.Service
-	Publisher      RoutedMessagePublisher
-	AdminService   *admin.Service
-	UserService    *admin.UserService
-	AuthService    *admin.AuthService
-	MeetingService *admin.MeetingService
-	BootstrapAdmin admin.BootstrapAdminConfig
-	AdminHandler   http.Handler
-	HTTPServer     *http.Server
-	httpHost       string
-	httpPort       int
-	httpAddress    string
-	closeAdmin     func()
+	mu              sync.RWMutex
+	SessionManager  *session.Manager
+	MQTTServer      *mqtttransport.Server
+	MQTTRuntime     *mqtttransport.Runtime
+	MQTTBroker      *mqtttransport.EmbeddedBroker
+	UDPServer       *udptransport.Server
+	STTService      *stt.Service
+	SummaryService  *summary.Service
+	ActionItems     *action_items.Service
+	TTSService      *tts.Service
+	TranscriptStore transcriptruntime.Store
+	AnalysisRuntime *analysisruntime.Runtime
+	Publisher       RoutedMessagePublisher
+	AdminService    *admin.Service
+	UserService     *admin.UserService
+	AuthService     *admin.AuthService
+	MeetingService  *admin.MeetingService
+	BootstrapAdmin  admin.BootstrapAdminConfig
+	AdminHandler    http.Handler
+	HTTPServer      *http.Server
+	httpHost        string
+	httpPort        int
+	httpAddress     string
+	closeAdmin      func()
 }
 
 func New() *App {
@@ -118,6 +123,7 @@ func NewFromConfig(cfg config.Config) *App {
 		SummaryService:     buildSummaryService(cfg),
 		ActionItemsService: buildActionItemsService(cfg),
 		TTSService:         buildTTSService(cfg),
+		TranscriptStore:    transcriptruntime.NewPostgresStore(cfg.Database.URL),
 		BootstrapAdmin: admin.BootstrapAdminConfig{
 			Username:    cfg.BootstrapAdmin.Username,
 			Password:    cfg.BootstrapAdmin.Password,
@@ -132,6 +138,7 @@ func NewFromConfig(cfg config.Config) *App {
 	}
 
 	var closeResources []func()
+	closeResources = append(closeResources, app.TranscriptStore.Close)
 	postgresStore := admin.NewPostgresStore(cfg.Database.URL)
 	store := admin.Store(postgresStore)
 	closeResources = append(closeResources, postgresStore.Close)
@@ -195,6 +202,27 @@ func NewWithOptions(options Options) *App {
 	if ttsService == nil {
 		ttsService = tts.NewService()
 	}
+	transcriptStore := options.TranscriptStore
+	if transcriptStore == nil {
+		transcriptStore = transcriptruntime.NewMemoryStore()
+	}
+
+	basePublishers := []RoutedMessagePublisher{}
+	if options.Publisher != nil {
+		basePublishers = append(basePublishers, options.Publisher)
+	}
+	if len(basePublishers) == 0 {
+		basePublishers = append(basePublishers, LogPublisher{})
+	}
+	publisher := &DynamicPublisher{}
+	publisher.SetPublishers(basePublishers)
+
+	analysisRuntime := analysisruntime.NewRuntime(analysisruntime.Options{
+		TranscriptStore: transcriptStore,
+		ActionItems:     actionItemsService,
+		Summary:         summaryService,
+		Publisher:       publisher,
+	})
 
 	sessionManager := session.NewManager(session.Options{
 		UDPHost:            options.UDPHost,
@@ -202,48 +230,37 @@ func NewWithOptions(options Options) *App {
 		STTService:         sttService,
 		SummaryService:     summaryService,
 		ActionItemsService: actionItemsService,
+		TranscriptStore:    transcriptStore,
+		AnalysisScheduler:  analysisRuntime,
 	})
-
 	mqttServer := mqtttransport.NewServer(sessionManager)
 	var mqttRuntime *mqtttransport.Runtime
 	if options.MQTTClient != nil {
 		mqttRuntime = mqtttransport.NewRuntime(mqttServer, options.MQTTClient)
-	}
-
-	publishers := []RoutedMessagePublisher{}
-	if mqttRuntime != nil {
-		publishers = append(publishers, mqttRuntime)
-	}
-	if options.Publisher != nil {
-		publishers = append(publishers, options.Publisher)
-	}
-	if len(publishers) == 0 {
-		publishers = append(publishers, LogPublisher{})
-	}
-
-	publisher := MultiPublisher{
-		publishers: publishers,
+		publisher.SetPublishers(append([]RoutedMessagePublisher{mqttRuntime}, basePublishers...))
 	}
 
 	return &App{
-		SessionManager: sessionManager,
-		MQTTServer:     mqttServer,
-		MQTTRuntime:    mqttRuntime,
-		MQTTBroker:     options.MQTTBroker,
-		UDPServer:      udptransport.NewServer(options.UDPHost, options.UDPPort, sessionManager),
-		STTService:     sttService,
-		SummaryService: summaryService,
-		ActionItems:    actionItemsService,
-		TTSService:     ttsService,
-		Publisher:      publisher,
-		AdminService:   options.AdminService,
-		UserService:    options.UserService,
-		AuthService:    options.AuthService,
-		MeetingService: options.MeetingService,
-		BootstrapAdmin: options.BootstrapAdmin,
-		AdminHandler:   adminHandler(options.AdminService, options.UserService, options.MeetingService, options.AuthService),
-		httpHost:       options.HTTPHost,
-		httpPort:       options.HTTPPort,
+		SessionManager:  sessionManager,
+		MQTTServer:      mqttServer,
+		MQTTRuntime:     mqttRuntime,
+		MQTTBroker:      options.MQTTBroker,
+		UDPServer:       udptransport.NewServer(options.UDPHost, options.UDPPort, sessionManager),
+		STTService:      sttService,
+		SummaryService:  summaryService,
+		ActionItems:     actionItemsService,
+		TTSService:      ttsService,
+		TranscriptStore: transcriptStore,
+		AnalysisRuntime: analysisRuntime,
+		Publisher:       publisher,
+		AdminService:    options.AdminService,
+		UserService:     options.UserService,
+		AuthService:     options.AuthService,
+		MeetingService:  options.MeetingService,
+		BootstrapAdmin:  options.BootstrapAdmin,
+		AdminHandler:    adminHandler(options.AdminService, options.UserService, options.MeetingService, options.AuthService),
+		httpHost:        options.HTTPHost,
+		httpPort:        options.HTTPPort,
 	}
 }
 
@@ -312,9 +329,15 @@ func (a *App) Run(ctx context.Context) error {
 
 	select {
 	case err := <-errCh:
+		if a.AnalysisRuntime != nil {
+			a.AnalysisRuntime.Close()
+		}
 		return err
 	case <-ctx.Done():
 		<-done
+		if a.AnalysisRuntime != nil {
+			a.AnalysisRuntime.Close()
+		}
 		if a.closeAdmin != nil {
 			a.closeAdmin()
 		}
@@ -374,6 +397,28 @@ func (p MultiPublisher) Publish(messages []protocol.RoutedMessage) {
 	for _, publisher := range p.publishers {
 		publisher.Publish(messages)
 	}
+}
+
+type DynamicPublisher struct {
+	mu         sync.RWMutex
+	publishers []RoutedMessagePublisher
+}
+
+func (p *DynamicPublisher) Publish(messages []protocol.RoutedMessage) {
+	p.mu.RLock()
+	publishers := append([]RoutedMessagePublisher(nil), p.publishers...)
+	p.mu.RUnlock()
+
+	for _, publisher := range publishers {
+		publisher.Publish(messages)
+	}
+}
+
+func (p *DynamicPublisher) SetPublishers(publishers []RoutedMessagePublisher) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.publishers = append([]RoutedMessagePublisher(nil), publishers...)
 }
 
 func buildSTTService(cfg config.Config) *stt.Service {

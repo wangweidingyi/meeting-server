@@ -13,7 +13,7 @@ import (
 	"meeting-server/internal/protocol"
 )
 
-func TestVolcengineStreamingProviderEmitsRealtimeDeltaAndFinalTranscript(t *testing.T) {
+func TestVolcengineStreamingProviderEmitsRealtimeTranscriptSnapshots(t *testing.T) {
 	var (
 		seenAppKey     string
 		seenAccessKey  string
@@ -82,6 +82,9 @@ func TestVolcengineStreamingProviderEmitsRealtimeDeltaAndFinalTranscript(t *test
 	if firstDelta.Text != "大家好" {
 		t.Fatalf("unexpected first delta %q", firstDelta.Text)
 	}
+	if firstDelta.SegmentID != "session-1-transcript" {
+		t.Fatalf("unexpected first segment id %q", firstDelta.SegmentID)
+	}
 
 	finalPayload, ok := service.Flush("session-1")
 	if !ok {
@@ -92,6 +95,12 @@ func TestVolcengineStreamingProviderEmitsRealtimeDeltaAndFinalTranscript(t *test
 	}
 	if finalPayload.Text != "大家好 今天开始开会" {
 		t.Fatalf("unexpected final transcript %q", finalPayload.Text)
+	}
+	if finalPayload.SegmentID != firstDelta.SegmentID {
+		t.Fatalf("expected final transcript to reuse segment id, got %q vs %q", finalPayload.SegmentID, firstDelta.SegmentID)
+	}
+	if finalPayload.Revision <= firstDelta.Revision {
+		t.Fatalf("expected final revision to increase, got %d after %d", finalPayload.Revision, firstDelta.Revision)
 	}
 	if seenAppKey != "app-key" {
 		t.Fatalf("unexpected app key header %q", seenAppKey)
@@ -157,7 +166,7 @@ func TestBuildVolcengineInitPayloadUsesFixedBigmodelAndOmitsLanguageForAsync(t *
 	}
 
 	var decoded struct {
-		Audio map[string]any `json:"audio"`
+		Audio   map[string]any `json:"audio"`
 		Request struct {
 			ModelName string `json:"model_name"`
 		} `json:"request"`
