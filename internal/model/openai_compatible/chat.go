@@ -15,6 +15,7 @@ type ChatClient struct {
 	BaseURL    string
 	APIKey     string
 	Model      string
+	Temperature *float64
 	HTTPClient *http.Client
 }
 
@@ -22,7 +23,7 @@ type chatCompletionRequest struct {
 	Model          string         `json:"model"`
 	Messages       []chatMessage  `json:"messages"`
 	ResponseFormat responseFormat `json:"response_format"`
-	Temperature    float64        `json:"temperature,omitempty"`
+	Temperature    *float64       `json:"temperature,omitempty"`
 }
 
 type chatMessage struct {
@@ -54,7 +55,7 @@ func (c *ChatClient) CompleteJSON(ctx context.Context, systemPrompt, userPrompt 
 			{Role: "user", Content: userPrompt},
 		},
 		ResponseFormat: responseFormat{Type: "json_object"},
-		Temperature:    0.2,
+		Temperature:    c.Temperature,
 	}
 
 	body, err := json.Marshal(requestBody)

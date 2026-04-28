@@ -101,8 +101,20 @@ func NewChatClient(cfg config.ModelProviderConfig) (string, *openaicompat.ChatCl
 	}
 
 	return RuntimeProviderName(provider), &openaicompat.ChatClient{
-		BaseURL: baseURL,
-		APIKey:  cfg.APIKey,
-		Model:   cfg.Model,
+		BaseURL:     baseURL,
+		APIKey:      cfg.APIKey,
+		Model:       cfg.Model,
+		Temperature: defaultTemperature(provider),
 	}, true
+}
+
+func defaultTemperature(provider string) *float64 {
+	switch CanonicalProviderName(provider) {
+	case "kimi":
+		// Kimi K2.5 rejects arbitrary temperature values and returns HTTP 400.
+		return nil
+	default:
+		temperature := 0.2
+		return &temperature
+	}
 }
