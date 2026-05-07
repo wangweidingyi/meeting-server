@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -21,7 +22,7 @@ type InitializeSystemRequest struct {
 	Password    string `json:"password"`
 }
 
-func NewHandler(service *Service, userService *UserService, meetingService *MeetingService, authService *AuthService) http.Handler {
+func NewHandler(service *Service, userService *UserService, meetingService *MeetingService, meetingDetailService *MeetingDetailService, authService *AuthService) http.Handler {
 	engine := gin.New()
 	engine.HandleMethodNotAllowed = true
 	engine.Use(gin.Recovery(), corsMiddleware())
@@ -325,6 +326,55 @@ func NewHandler(service *Service, userService *UserService, meetingService *Meet
 	if meetingService != nil && authService != nil {
 		appRoutes := engine.Group("/api/app")
 		appRoutes.Use(requireAuthenticated(authService))
+		appRoutes.GET("/meetings", func(context *gin.Context) {
+			authContext, ok := currentAuthContext(context)
+			if !ok {
+				context.JSON(http.StatusUnauthorized, gin.H{
+					"error": "unauthorized",
+				})
+				return
+			}
+
+			meetings, err := meetingService.ListByUser(context.Request.Context(), authContext.User.ID)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{
+					"error": err.Error(),
+				})
+				return
+			}
+
+			context.JSON(http.StatusOK, gin.H{
+				"items": meetings,
+			})
+		})
+		appRoutes.GET("/meetings/recoverable", func(context *gin.Context) {
+			authContext, ok := currentAuthContext(context)
+			if !ok {
+				context.JSON(http.StatusUnauthorized, gin.H{
+					"error": "unauthorized",
+				})
+				return
+			}
+
+			meetings, err := meetingService.ListByUser(context.Request.Context(), authContext.User.ID)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{
+					"error": err.Error(),
+				})
+				return
+			}
+
+			items := make([]MeetingRecord, 0)
+			for _, meeting := range meetings {
+				if isRecoverableMeetingStatus(meeting.Status) {
+					items = append(items, meeting)
+				}
+			}
+
+			context.JSON(http.StatusOK, gin.H{
+				"items": items,
+			})
+		})
 		appRoutes.PUT("/meetings/:meetingID", func(context *gin.Context) {
 			payload, ok := decodeMeetingRecord(context)
 			if !ok {
@@ -369,6 +419,330 @@ func NewHandler(service *Service, userService *UserService, meetingService *Meet
 			}
 
 			context.JSON(http.StatusOK, meeting)
+		})
+		appRoutes.GET("/meetings/:meetingID", func(context *gin.Context) {
+			if meetingDetailService == nil {
+				context.JSON(http.StatusNotFound, gin.H{
+					"error": "meeting detail unavailable",
+				})
+				return
+			}
+
+			authContext, ok := currentAuthContext(context)
+			if !ok {
+				context.JSON(http.StatusUnauthorized, gin.H{
+					"error": "unauthorized",
+				})
+				return
+			}
+
+			meeting, found, err := findMeetingForUser(context.Request.Context(), meetingService, authContext.User.ID, context.Param("meetingID"))
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{
+					"error": err.Error(),
+				})
+				return
+			}
+			if !found {
+				context.JSON(http.StatusNotFound, gin.H{
+					"error": "meeting not found",
+				})
+				return
+			}
+
+			transcriptSegments, err := meetingDetailService.ListTranscriptSegmentsByMeeting(context.Request.Context(), meeting.ID)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{
+					"error": err.Error(),
+				})
+				return
+			}
+			summary, err := meetingDetailService.LatestSummarySnapshot(context.Request.Context(), meeting.ID)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{
+					"error": err.Error(),
+				})
+				return
+			}
+
+			actionItems := []string{}
+			if summary != nil {
+				actionItems = cloneStrings(summary.ActionItems)
+			}
+
+			context.JSON(http.StatusOK, MeetingDetailResponse{
+				Meeting:            meeting,
+				TranscriptSegments: transcriptSegments,
+				Summary:            summary,
+				ActionItems:        actionItems,
+			})
+		})
+		appRoutes.PUT("/meetings/:meetingID/transcript-segments/:segmentID", func(context *gin.Context) {
+			if meetingDetailService == nil {
+				context.JSON(http.StatusNotFound, gin.H{
+					"error": "meeting detail unavailable",
+				})
+				return
+			}
+
+			authContext, ok := currentAuthContext(context)
+			if !ok {
+				context.JSON(http.StatusUnauthorized, gin.H{
+					"error": "unauthorized",
+				})
+				return
+			}
+
+			meetingID := context.Param("meetingID")
+			if _, found, err := findMeetingForUser(context.Request.Context(), meetingService, authContext.User.ID, meetingID); err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			} else if !found {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting not found"})
+				return
+			}
+
+			payload, ok := decodeTranscriptSegmentRecord(context)
+			if !ok {
+				return
+			}
+			if payload.MeetingID == "" {
+				payload.MeetingID = meetingID
+			}
+			if payload.SegmentID == "" {
+				payload.SegmentID = context.Param("segmentID")
+			}
+			if payload.MeetingID != meetingID || payload.SegmentID != context.Param("segmentID") {
+				context.JSON(http.StatusBadRequest, gin.H{"error": "meeting_detail_id_mismatch"})
+				return
+			}
+
+			segment, err := meetingDetailService.UpsertTranscriptSegment(context.Request.Context(), payload)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			context.JSON(http.StatusOK, segment)
+		})
+		appRoutes.PUT("/meetings/:meetingID/summary", func(context *gin.Context) {
+			if meetingDetailService == nil {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting detail unavailable"})
+				return
+			}
+
+			authContext, ok := currentAuthContext(context)
+			if !ok {
+				context.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				return
+			}
+
+			meetingID := context.Param("meetingID")
+			if _, found, err := findMeetingForUser(context.Request.Context(), meetingService, authContext.User.ID, meetingID); err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			} else if !found {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting not found"})
+				return
+			}
+
+			payload, ok := decodeSummarySnapshotRecord(context)
+			if !ok {
+				return
+			}
+			if payload.MeetingID == "" {
+				payload.MeetingID = meetingID
+			}
+			if payload.MeetingID != meetingID {
+				context.JSON(http.StatusBadRequest, gin.H{"error": "meeting_detail_id_mismatch"})
+				return
+			}
+
+			summary, err := meetingDetailService.UpsertSummarySnapshot(context.Request.Context(), payload)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			context.JSON(http.StatusOK, summary)
+		})
+		appRoutes.PUT("/meetings/:meetingID/action-items", func(context *gin.Context) {
+			if meetingDetailService == nil {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting detail unavailable"})
+				return
+			}
+
+			authContext, ok := currentAuthContext(context)
+			if !ok {
+				context.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				return
+			}
+
+			meetingID := context.Param("meetingID")
+			if _, found, err := findMeetingForUser(context.Request.Context(), meetingService, authContext.User.ID, meetingID); err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			} else if !found {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting not found"})
+				return
+			}
+
+			payload, ok := decodeActionItemsRecord(context)
+			if !ok {
+				return
+			}
+			if payload.MeetingID == "" {
+				payload.MeetingID = meetingID
+			}
+			if payload.MeetingID != meetingID {
+				context.JSON(http.StatusBadRequest, gin.H{"error": "meeting_detail_id_mismatch"})
+				return
+			}
+
+			summary, err := meetingDetailService.ApplyActionItems(context.Request.Context(), payload)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			context.JSON(http.StatusOK, summary)
+		})
+		appRoutes.GET("/meetings/:meetingID/checkpoint", func(context *gin.Context) {
+			if meetingDetailService == nil {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting detail unavailable"})
+				return
+			}
+
+			authContext, ok := currentAuthContext(context)
+			if !ok {
+				context.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				return
+			}
+			meetingID := context.Param("meetingID")
+			if _, found, err := findMeetingForUser(context.Request.Context(), meetingService, authContext.User.ID, meetingID); err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			} else if !found {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting not found"})
+				return
+			}
+
+			checkpoint, found, err := meetingDetailService.FindCheckpoint(context.Request.Context(), meetingID)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			if !found {
+				context.JSON(http.StatusNotFound, gin.H{"error": "checkpoint not found"})
+				return
+			}
+			context.JSON(http.StatusOK, checkpoint)
+		})
+		appRoutes.PUT("/meetings/:meetingID/checkpoint", func(context *gin.Context) {
+			if meetingDetailService == nil {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting detail unavailable"})
+				return
+			}
+
+			authContext, ok := currentAuthContext(context)
+			if !ok {
+				context.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				return
+			}
+			meetingID := context.Param("meetingID")
+			if _, found, err := findMeetingForUser(context.Request.Context(), meetingService, authContext.User.ID, meetingID); err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			} else if !found {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting not found"})
+				return
+			}
+
+			payload, ok := decodeSessionCheckpointRecord(context)
+			if !ok {
+				return
+			}
+			if payload.MeetingID == "" {
+				payload.MeetingID = meetingID
+			}
+			if payload.MeetingID != meetingID {
+				context.JSON(http.StatusBadRequest, gin.H{"error": "meeting_detail_id_mismatch"})
+				return
+			}
+
+			checkpoint, err := meetingDetailService.UpsertCheckpoint(context.Request.Context(), payload)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			context.JSON(http.StatusOK, checkpoint)
+		})
+		appRoutes.PUT("/meetings/:meetingID/audio-assets", func(context *gin.Context) {
+			if meetingDetailService == nil {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting detail unavailable"})
+				return
+			}
+
+			authContext, ok := currentAuthContext(context)
+			if !ok {
+				context.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				return
+			}
+			meetingID := context.Param("meetingID")
+			if _, found, err := findMeetingForUser(context.Request.Context(), meetingService, authContext.User.ID, meetingID); err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			} else if !found {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting not found"})
+				return
+			}
+
+			payload, ok := decodeAudioAssetRecord(context)
+			if !ok {
+				return
+			}
+			if payload.MeetingID == "" {
+				payload.MeetingID = meetingID
+			}
+			if payload.MeetingID != meetingID {
+				context.JSON(http.StatusBadRequest, gin.H{"error": "meeting_detail_id_mismatch"})
+				return
+			}
+
+			assets, err := meetingDetailService.UpsertAudioAssets(context.Request.Context(), payload)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			context.JSON(http.StatusOK, assets)
+		})
+		appRoutes.GET("/meetings/:meetingID/audio-assets", func(context *gin.Context) {
+			if meetingDetailService == nil {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting detail unavailable"})
+				return
+			}
+
+			authContext, ok := currentAuthContext(context)
+			if !ok {
+				context.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				return
+			}
+			meetingID := context.Param("meetingID")
+			if _, found, err := findMeetingForUser(context.Request.Context(), meetingService, authContext.User.ID, meetingID); err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			} else if !found {
+				context.JSON(http.StatusNotFound, gin.H{"error": "meeting not found"})
+				return
+			}
+
+			assets, found, err := meetingDetailService.FindAudioAssets(context.Request.Context(), meetingID)
+			if err != nil {
+				context.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			if !found {
+				context.JSON(http.StatusNotFound, gin.H{"error": "audio assets not found"})
+				return
+			}
+			context.JSON(http.StatusOK, assets)
 		})
 	}
 
@@ -484,6 +858,46 @@ func decodeMeetingRecord(context *gin.Context) (MeetingRecord, bool) {
 	return payload, true
 }
 
+func decodeTranscriptSegmentRecord(context *gin.Context) (TranscriptSegmentRecord, bool) {
+	var payload TranscriptSegmentRecord
+	if !decodeJSON(context, &payload) {
+		return TranscriptSegmentRecord{}, false
+	}
+	return payload, true
+}
+
+func decodeSummarySnapshotRecord(context *gin.Context) (SummarySnapshotRecord, bool) {
+	var payload SummarySnapshotRecord
+	if !decodeJSON(context, &payload) {
+		return SummarySnapshotRecord{}, false
+	}
+	return payload, true
+}
+
+func decodeActionItemsRecord(context *gin.Context) (ActionItemsRecord, bool) {
+	var payload ActionItemsRecord
+	if !decodeJSON(context, &payload) {
+		return ActionItemsRecord{}, false
+	}
+	return payload, true
+}
+
+func decodeSessionCheckpointRecord(context *gin.Context) (SessionCheckpointRecord, bool) {
+	var payload SessionCheckpointRecord
+	if !decodeJSON(context, &payload) {
+		return SessionCheckpointRecord{}, false
+	}
+	return payload, true
+}
+
+func decodeAudioAssetRecord(context *gin.Context) (AudioAssetRecord, bool) {
+	var payload AudioAssetRecord
+	if !decodeJSON(context, &payload) {
+		return AudioAssetRecord{}, false
+	}
+	return payload, true
+}
+
 func decodeJSON(context *gin.Context, payload any) bool {
 	if context.Request.Body == nil {
 		context.JSON(http.StatusBadRequest, gin.H{
@@ -500,4 +914,28 @@ func decodeJSON(context *gin.Context, payload any) bool {
 	}
 
 	return true
+}
+
+func isRecoverableMeetingStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "connecting", "ready", "recording", "paused", "stopping", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func findMeetingForUser(ctx context.Context, meetingService *MeetingService, userID, meetingID string) (MeetingRecord, bool, error) {
+	meetings, err := meetingService.ListByUser(ctx, userID)
+	if err != nil {
+		return MeetingRecord{}, false, err
+	}
+
+	for _, meeting := range meetings {
+		if meeting.ID == meetingID {
+			return meeting, true, nil
+		}
+	}
+
+	return MeetingRecord{}, false, nil
 }

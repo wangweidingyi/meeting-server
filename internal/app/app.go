@@ -39,50 +39,52 @@ func (LogPublisher) Publish(messages []protocol.RoutedMessage) {
 }
 
 type Options struct {
-	UDPHost            string
-	UDPPort            int
-	HTTPHost           string
-	HTTPPort           int
-	Publisher          RoutedMessagePublisher
-	MQTTClient         mqtttransport.BrokerClient
-	MQTTBroker         *mqtttransport.EmbeddedBroker
-	STTService         *stt.Service
-	SummaryService     *summary.Service
-	ActionItemsService *action_items.Service
-	TTSService         *tts.Service
-	TranscriptStore    transcriptruntime.Store
-	AdminService       *admin.Service
-	UserService        *admin.UserService
-	AuthService        *admin.AuthService
-	MeetingService     *admin.MeetingService
-	BootstrapAdmin     admin.BootstrapAdminConfig
+	UDPHost              string
+	UDPPort              int
+	HTTPHost             string
+	HTTPPort             int
+	Publisher            RoutedMessagePublisher
+	MQTTClient           mqtttransport.BrokerClient
+	MQTTBroker           *mqtttransport.EmbeddedBroker
+	STTService           *stt.Service
+	SummaryService       *summary.Service
+	ActionItemsService   *action_items.Service
+	TTSService           *tts.Service
+	TranscriptStore      transcriptruntime.Store
+	AdminService         *admin.Service
+	UserService          *admin.UserService
+	AuthService          *admin.AuthService
+	MeetingService       *admin.MeetingService
+	MeetingDetailService *admin.MeetingDetailService
+	BootstrapAdmin       admin.BootstrapAdminConfig
 }
 
 type App struct {
-	mu              sync.RWMutex
-	SessionManager  *session.Manager
-	MQTTServer      *mqtttransport.Server
-	MQTTRuntime     *mqtttransport.Runtime
-	MQTTBroker      *mqtttransport.EmbeddedBroker
-	UDPServer       *udptransport.Server
-	STTService      *stt.Service
-	SummaryService  *summary.Service
-	ActionItems     *action_items.Service
-	TTSService      *tts.Service
-	TranscriptStore transcriptruntime.Store
-	AnalysisRuntime *analysisruntime.Runtime
-	Publisher       RoutedMessagePublisher
-	AdminService    *admin.Service
-	UserService     *admin.UserService
-	AuthService     *admin.AuthService
-	MeetingService  *admin.MeetingService
-	BootstrapAdmin  admin.BootstrapAdminConfig
-	AdminHandler    http.Handler
-	HTTPServer      *http.Server
-	httpHost        string
-	httpPort        int
-	httpAddress     string
-	closeAdmin      func()
+	mu                   sync.RWMutex
+	SessionManager       *session.Manager
+	MQTTServer           *mqtttransport.Server
+	MQTTRuntime          *mqtttransport.Runtime
+	MQTTBroker           *mqtttransport.EmbeddedBroker
+	UDPServer            *udptransport.Server
+	STTService           *stt.Service
+	SummaryService       *summary.Service
+	ActionItems          *action_items.Service
+	TTSService           *tts.Service
+	TranscriptStore      transcriptruntime.Store
+	AnalysisRuntime      *analysisruntime.Runtime
+	Publisher            RoutedMessagePublisher
+	AdminService         *admin.Service
+	UserService          *admin.UserService
+	AuthService          *admin.AuthService
+	MeetingService       *admin.MeetingService
+	MeetingDetailService *admin.MeetingDetailService
+	BootstrapAdmin       admin.BootstrapAdminConfig
+	AdminHandler         http.Handler
+	HTTPServer           *http.Server
+	httpHost             string
+	httpPort             int
+	httpAddress          string
+	closeAdmin           func()
 }
 
 func New() *App {
@@ -147,6 +149,9 @@ func NewFromConfig(cfg config.Config) *App {
 	meetingStore := admin.MeetingStore(postgresMeetingStore)
 	closeResources = append(closeResources, postgresMeetingStore.Close)
 
+	postgresMeetingDetailStore := admin.NewPostgresMeetingDetailStore(cfg.Database.URL)
+	closeResources = append(closeResources, postgresMeetingDetailStore.Close)
+
 	postgresUserStore := admin.NewPostgresUserStore(cfg.Database.URL)
 	userStore := admin.UserStore(postgresUserStore)
 	closeResources = append(closeResources, postgresUserStore.Close)
@@ -161,17 +166,19 @@ func NewFromConfig(cfg config.Config) *App {
 	userService := admin.NewUserService(userStore, meetingStore)
 	authService := admin.NewAuthService(userService, authStore)
 	meetingService := admin.NewMeetingService(meetingStore)
+	meetingDetailService := admin.NewMeetingDetailService(postgresMeetingDetailStore)
 
 	app.AdminService = adminService
 	app.UserService = userService
 	app.AuthService = authService
 	app.MeetingService = meetingService
+	app.MeetingDetailService = meetingDetailService
 	app.BootstrapAdmin = admin.BootstrapAdminConfig{
 		Username:    cfg.BootstrapAdmin.Username,
 		Password:    cfg.BootstrapAdmin.Password,
 		DisplayName: cfg.BootstrapAdmin.DisplayName,
 	}
-	app.AdminHandler = admin.NewHandler(adminService, userService, meetingService, authService)
+	app.AdminHandler = admin.NewHandler(adminService, userService, meetingService, meetingDetailService, authService)
 	app.closeAdmin = func() {
 		for _, closeFn := range closeResources {
 			if closeFn != nil {
@@ -258,7 +265,7 @@ func NewWithOptions(options Options) *App {
 		AuthService:     options.AuthService,
 		MeetingService:  options.MeetingService,
 		BootstrapAdmin:  options.BootstrapAdmin,
-		AdminHandler:    adminHandler(options.AdminService, options.UserService, options.MeetingService, options.AuthService),
+		AdminHandler:    adminHandler(options.AdminService, options.UserService, options.MeetingService, options.MeetingDetailService, options.AuthService),
 		httpHost:        options.HTTPHost,
 		httpPort:        options.HTTPPort,
 	}
@@ -507,8 +514,8 @@ func ttsSynthesizer(cfg config.SpeechProviderConfig) tts.Synthesizer {
 	return tts.StubSynthesizer{}
 }
 
-func adminHandler(service *admin.Service, userService *admin.UserService, meetingService *admin.MeetingService, authService *admin.AuthService) http.Handler {
-	if service == nil && userService == nil && meetingService == nil && authService == nil {
+func adminHandler(service *admin.Service, userService *admin.UserService, meetingService *admin.MeetingService, meetingDetailService *admin.MeetingDetailService, authService *admin.AuthService) http.Handler {
+	if service == nil && userService == nil && meetingService == nil && meetingDetailService == nil && authService == nil {
 		return nil
 	}
 
@@ -517,5 +524,9 @@ func adminHandler(service *admin.Service, userService *admin.UserService, meetin
 		_ = service.Bootstrap(context.Background())
 	}
 
-	return admin.NewHandler(service, userService, meetingService, authService)
+	if meetingDetailService == nil {
+		meetingDetailService = admin.NewMeetingDetailService(admin.NewMemoryMeetingDetailStore())
+	}
+
+	return admin.NewHandler(service, userService, meetingService, meetingDetailService, authService)
 }

@@ -25,7 +25,7 @@ func TestNewHandlerReturnsGinEngine(t *testing.T) {
 	}
 
 	meetingStore := NewMemoryMeetingStore()
-	handler := NewHandler(service, NewUserService(NewMemoryUserStore(), meetingStore), NewMeetingService(meetingStore), nil)
+	handler := NewHandler(service, NewUserService(NewMemoryUserStore(), meetingStore), NewMeetingService(meetingStore), NewMeetingDetailService(NewMemoryMeetingDetailStore()), nil)
 	if _, ok := handler.(*gin.Engine); !ok {
 		t.Fatalf("expected *gin.Engine, got %T", handler)
 	}
@@ -51,7 +51,7 @@ func TestHandlerReturnsCurrentSettings(t *testing.T) {
 	recorder := httptest.NewRecorder()
 
 	meetingStore := NewMemoryMeetingStore()
-	NewHandler(service, NewUserService(NewMemoryUserStore(), meetingStore), NewMeetingService(meetingStore), nil).ServeHTTP(recorder, request)
+	NewHandler(service, NewUserService(NewMemoryUserStore(), meetingStore), NewMeetingService(meetingStore), NewMeetingDetailService(NewMemoryMeetingDetailStore()), nil).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status %d", recorder.Code)
@@ -115,7 +115,7 @@ func TestHandlerUpdatesSettings(t *testing.T) {
 	recorder := httptest.NewRecorder()
 
 	meetingStore := NewMemoryMeetingStore()
-	NewHandler(service, NewUserService(NewMemoryUserStore(), meetingStore), NewMeetingService(meetingStore), nil).ServeHTTP(recorder, request)
+	NewHandler(service, NewUserService(NewMemoryUserStore(), meetingStore), NewMeetingService(meetingStore), NewMeetingDetailService(NewMemoryMeetingDetailStore()), nil).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status %d body=%s", recorder.Code, recorder.Body.String())
@@ -206,7 +206,7 @@ func TestHandlerTestsSettings(t *testing.T) {
 	recorder := httptest.NewRecorder()
 
 	meetingStore := NewMemoryMeetingStore()
-	NewHandler(service, NewUserService(NewMemoryUserStore(), meetingStore), NewMeetingService(meetingStore), nil).ServeHTTP(recorder, request)
+	NewHandler(service, NewUserService(NewMemoryUserStore(), meetingStore), NewMeetingService(meetingStore), NewMeetingDetailService(NewMemoryMeetingDetailStore()), nil).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status %d body=%s", recorder.Code, recorder.Body.String())
@@ -269,7 +269,7 @@ func TestHandlerUpsertsMeetings(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPut, "/api/admin/meetings/meeting-1", bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 
-	NewHandler(service, userService, meetingService, nil).ServeHTTP(recorder, request)
+	NewHandler(service, userService, meetingService, NewMeetingDetailService(NewMemoryMeetingDetailStore()), nil).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status %d body=%s", recorder.Code, recorder.Body.String())
@@ -277,7 +277,7 @@ func TestHandlerUpsertsMeetings(t *testing.T) {
 
 	listRecorder := httptest.NewRecorder()
 	listRequest := httptest.NewRequest(http.MethodGet, "/api/admin/meetings", nil)
-	NewHandler(service, userService, meetingService, nil).ServeHTTP(listRecorder, listRequest)
+	NewHandler(service, userService, meetingService, NewMeetingDetailService(NewMemoryMeetingDetailStore()), nil).ServeHTTP(listRecorder, listRequest)
 
 	if listRecorder.Code != http.StatusOK {
 		t.Fatalf("unexpected list status %d body=%s", listRecorder.Code, listRecorder.Body.String())
@@ -347,7 +347,7 @@ func TestHandlerListsUsersWithMeetingHistory(t *testing.T) {
 	upsertRecorder := httptest.NewRecorder()
 	upsertRequest := httptest.NewRequest(http.MethodPut, "/api/admin/meetings/meeting-1", bytes.NewReader(body))
 	upsertRequest.Header.Set("Content-Type", "application/json")
-	NewHandler(service, userService, meetingService, nil).ServeHTTP(upsertRecorder, upsertRequest)
+	NewHandler(service, userService, meetingService, NewMeetingDetailService(NewMemoryMeetingDetailStore()), nil).ServeHTTP(upsertRecorder, upsertRequest)
 
 	if upsertRecorder.Code != http.StatusOK {
 		t.Fatalf("unexpected upsert status %d body=%s", upsertRecorder.Code, upsertRecorder.Body.String())
@@ -355,7 +355,7 @@ func TestHandlerListsUsersWithMeetingHistory(t *testing.T) {
 
 	usersRecorder := httptest.NewRecorder()
 	usersRequest := httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
-	NewHandler(service, userService, meetingService, nil).ServeHTTP(usersRecorder, usersRequest)
+	NewHandler(service, userService, meetingService, NewMeetingDetailService(NewMemoryMeetingDetailStore()), nil).ServeHTTP(usersRecorder, usersRequest)
 
 	if usersRecorder.Code != http.StatusOK {
 		t.Fatalf("unexpected users status %d body=%s", usersRecorder.Code, usersRecorder.Body.String())
@@ -383,7 +383,7 @@ func TestHandlerListsUsersWithMeetingHistory(t *testing.T) {
 
 	meetingsRecorder := httptest.NewRecorder()
 	meetingsRequest := httptest.NewRequest(http.MethodGet, "/api/admin/users/user-1/meetings", nil)
-	NewHandler(service, userService, meetingService, nil).ServeHTTP(meetingsRecorder, meetingsRequest)
+	NewHandler(service, userService, meetingService, NewMeetingDetailService(NewMemoryMeetingDetailStore()), nil).ServeHTTP(meetingsRecorder, meetingsRequest)
 
 	if meetingsRecorder.Code != http.StatusOK {
 		t.Fatalf("unexpected meetings status %d body=%s", meetingsRecorder.Code, meetingsRecorder.Body.String())

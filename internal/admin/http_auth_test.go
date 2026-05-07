@@ -65,7 +65,7 @@ func newAuthHandlerFixture(t *testing.T) authHandlerFixture {
 	}
 
 	return authHandlerFixture{
-		handler:        NewHandler(settings, userService, meetingService, authService),
+		handler:        NewHandler(settings, userService, meetingService, NewMeetingDetailService(NewMemoryMeetingDetailStore()), authService),
 		settings:       settings,
 		users:          userService,
 		meetings:       meetingService,
@@ -122,7 +122,7 @@ func TestSetupStatusReportsWhetherSystemIsInitialized(t *testing.T) {
 	meetingStore := NewMemoryMeetingStore()
 	userService := NewUserService(NewMemoryUserStore(), meetingStore)
 	authService := NewAuthService(userService, NewMemoryAuthStore())
-	handler := NewHandler(settings, userService, NewMeetingService(meetingStore), authService)
+	handler := NewHandler(settings, userService, NewMeetingService(meetingStore), NewMeetingDetailService(NewMemoryMeetingDetailStore()), authService)
 
 	uninitializedRecorder := httptest.NewRecorder()
 	uninitializedRequest := httptest.NewRequest(http.MethodGet, "/api/setup/status", nil)
@@ -155,7 +155,7 @@ func TestSetupInitializeCreatesFirstAdminAndReturnsSession(t *testing.T) {
 	meetingStore := NewMemoryMeetingStore()
 	userService := NewUserService(NewMemoryUserStore(), meetingStore)
 	authService := NewAuthService(userService, NewMemoryAuthStore())
-	handler := NewHandler(settings, userService, NewMeetingService(meetingStore), authService)
+	handler := NewHandler(settings, userService, NewMeetingService(meetingStore), NewMeetingDetailService(NewMemoryMeetingDetailStore()), authService)
 
 	body := marshalJSON(t, map[string]string{
 		"username":     "root-admin",
@@ -391,6 +391,200 @@ func TestAppMeetingSyncBindsMeetingToAuthenticatedUser(t *testing.T) {
 	}
 	if response.UserName != fixture.memberUser.DisplayName {
 		t.Fatalf("expected meeting to bind authenticated user name, got %q", response.UserName)
+	}
+}
+
+func TestAppMeetingRoutesPersistAndReadMeetingDetailState(t *testing.T) {
+	fixture := newAuthHandlerFixture(t)
+	memberSession := loginThroughHTTP(t, fixture.handler, LoginRequest{
+		Username:   "member",
+		Password:   fixture.memberPassword,
+		ClientType: ClientTypeDesktop,
+	})
+
+	meetingBody := marshalJSON(t, MeetingRecord{
+		ID:         "meeting-detail-1",
+		ClientID:   "desktop-client-1",
+		Title:      "会议详情同步",
+		Status:     "recording",
+		StartedAt:  "1710000000000",
+		DurationMS: 2000,
+	})
+	meetingRecorder := httptest.NewRecorder()
+	meetingRequest := httptest.NewRequest(http.MethodPut, "/api/app/meetings/meeting-detail-1", bytes.NewReader(meetingBody))
+	meetingRequest.Header.Set("Authorization", "Bearer "+memberSession.Token)
+	meetingRequest.Header.Set("Content-Type", "application/json")
+	fixture.handler.ServeHTTP(meetingRecorder, meetingRequest)
+	if meetingRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected meeting sync status %d body=%s", meetingRecorder.Code, meetingRecorder.Body.String())
+	}
+
+	segmentBody := marshalJSON(t, TranscriptSegmentRecord{
+		MeetingID: "meeting-detail-1",
+		SegmentID: "segment-1",
+		StartMS:   0,
+		EndMS:     1200,
+		Text:      "转写内容",
+		IsFinal:   true,
+		Revision:  2,
+	})
+	segmentRecorder := httptest.NewRecorder()
+	segmentRequest := httptest.NewRequest(http.MethodPut, "/api/app/meetings/meeting-detail-1/transcript-segments/segment-1", bytes.NewReader(segmentBody))
+	segmentRequest.Header.Set("Authorization", "Bearer "+memberSession.Token)
+	segmentRequest.Header.Set("Content-Type", "application/json")
+	fixture.handler.ServeHTTP(segmentRecorder, segmentRequest)
+	if segmentRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected transcript sync status %d body=%s", segmentRecorder.Code, segmentRecorder.Body.String())
+	}
+
+	summaryBody := marshalJSON(t, SummarySnapshotRecord{
+		MeetingID:    "meeting-detail-1",
+		Version:      3,
+		UpdatedAt:    "2026-05-07T10:00:00Z",
+		AbstractText: "摘要内容",
+		KeyPoints:    []string{"关键点"},
+		Decisions:    []string{"决策"},
+		Risks:        []string{"风险"},
+		ActionItems:  []string{},
+		IsFinal:      false,
+	})
+	summaryRecorder := httptest.NewRecorder()
+	summaryRequest := httptest.NewRequest(http.MethodPut, "/api/app/meetings/meeting-detail-1/summary", bytes.NewReader(summaryBody))
+	summaryRequest.Header.Set("Authorization", "Bearer "+memberSession.Token)
+	summaryRequest.Header.Set("Content-Type", "application/json")
+	fixture.handler.ServeHTTP(summaryRecorder, summaryRequest)
+	if summaryRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected summary sync status %d body=%s", summaryRecorder.Code, summaryRecorder.Body.String())
+	}
+
+	actionItemsBody := marshalJSON(t, ActionItemsRecord{
+		MeetingID: "meeting-detail-1",
+		Version:   4,
+		UpdatedAt: "2026-05-07T10:01:00Z",
+		Items:     []string{"行动项"},
+		IsFinal:   true,
+	})
+	actionItemsRecorder := httptest.NewRecorder()
+	actionItemsRequest := httptest.NewRequest(http.MethodPut, "/api/app/meetings/meeting-detail-1/action-items", bytes.NewReader(actionItemsBody))
+	actionItemsRequest.Header.Set("Authorization", "Bearer "+memberSession.Token)
+	actionItemsRequest.Header.Set("Content-Type", "application/json")
+	fixture.handler.ServeHTTP(actionItemsRecorder, actionItemsRequest)
+	if actionItemsRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected action items sync status %d body=%s", actionItemsRecorder.Code, actionItemsRecorder.Body.String())
+	}
+
+	recoveryToken := "recover-1"
+	checkpointBody := marshalJSON(t, SessionCheckpointRecord{
+		MeetingID:                     "meeting-detail-1",
+		LastControlSeq:                1,
+		LastUDPSeqSent:                9,
+		LastUploadedMixedMS:           1800,
+		LastTranscriptSegmentRevision: 2,
+		LastSummaryVersion:            4,
+		LastActionItemVersion:         4,
+		LocalRecordingState:           "recording",
+		RecoveryToken:                 &recoveryToken,
+		UpdatedAt:                     "2026-05-07T10:02:00Z",
+	})
+	checkpointRecorder := httptest.NewRecorder()
+	checkpointRequest := httptest.NewRequest(http.MethodPut, "/api/app/meetings/meeting-detail-1/checkpoint", bytes.NewReader(checkpointBody))
+	checkpointRequest.Header.Set("Authorization", "Bearer "+memberSession.Token)
+	checkpointRequest.Header.Set("Content-Type", "application/json")
+	fixture.handler.ServeHTTP(checkpointRecorder, checkpointRequest)
+	if checkpointRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected checkpoint sync status %d body=%s", checkpointRecorder.Code, checkpointRecorder.Body.String())
+	}
+
+	micPath := "/tmp/meeting-detail-1/mic.wav"
+	systemPath := "/tmp/meeting-detail-1/system.wav"
+	mixedPath := "/tmp/meeting-detail-1/mixed.wav"
+	assetsBody := marshalJSON(t, AudioAssetRecord{
+		MeetingID:          "meeting-detail-1",
+		MicOriginalPath:    &micPath,
+		SystemOriginalPath: &systemPath,
+		MixedUplinkPath:    &mixedPath,
+	})
+	assetsRecorder := httptest.NewRecorder()
+	assetsRequest := httptest.NewRequest(http.MethodPut, "/api/app/meetings/meeting-detail-1/audio-assets", bytes.NewReader(assetsBody))
+	assetsRequest.Header.Set("Authorization", "Bearer "+memberSession.Token)
+	assetsRequest.Header.Set("Content-Type", "application/json")
+	fixture.handler.ServeHTTP(assetsRecorder, assetsRequest)
+	if assetsRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected audio assets sync status %d body=%s", assetsRecorder.Code, assetsRecorder.Body.String())
+	}
+
+	listRecorder := httptest.NewRecorder()
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/app/meetings", nil)
+	listRequest.Header.Set("Authorization", "Bearer "+memberSession.Token)
+	fixture.handler.ServeHTTP(listRecorder, listRequest)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected app list meetings status %d body=%s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var listResponse struct {
+		Items []MeetingRecord `json:"items"`
+	}
+	if err := json.NewDecoder(listRecorder.Body).Decode(&listResponse); err != nil {
+		t.Fatalf("decode list meetings response: %v", err)
+	}
+	if len(listResponse.Items) != 1 {
+		t.Fatalf("expected one meeting in app list, got %d", len(listResponse.Items))
+	}
+
+	recoverableRecorder := httptest.NewRecorder()
+	recoverableRequest := httptest.NewRequest(http.MethodGet, "/api/app/meetings/recoverable", nil)
+	recoverableRequest.Header.Set("Authorization", "Bearer "+memberSession.Token)
+	fixture.handler.ServeHTTP(recoverableRecorder, recoverableRequest)
+	if recoverableRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected app recoverable list status %d body=%s", recoverableRecorder.Code, recoverableRecorder.Body.String())
+	}
+	var recoverableResponse struct {
+		Items []MeetingRecord `json:"items"`
+	}
+	if err := json.NewDecoder(recoverableRecorder.Body).Decode(&recoverableResponse); err != nil {
+		t.Fatalf("decode recoverable response: %v", err)
+	}
+	if len(recoverableResponse.Items) != 1 {
+		t.Fatalf("expected one recoverable meeting, got %d", len(recoverableResponse.Items))
+	}
+
+	detailRecorder := httptest.NewRecorder()
+	detailRequest := httptest.NewRequest(http.MethodGet, "/api/app/meetings/meeting-detail-1", nil)
+	detailRequest.Header.Set("Authorization", "Bearer "+memberSession.Token)
+	fixture.handler.ServeHTTP(detailRecorder, detailRequest)
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected app meeting detail status %d body=%s", detailRecorder.Code, detailRecorder.Body.String())
+	}
+
+	var detailResponse MeetingDetailResponse
+	if err := json.NewDecoder(detailRecorder.Body).Decode(&detailResponse); err != nil {
+		t.Fatalf("decode meeting detail response: %v", err)
+	}
+	if detailResponse.Meeting.ID != "meeting-detail-1" {
+		t.Fatalf("unexpected detail meeting id %q", detailResponse.Meeting.ID)
+	}
+	if len(detailResponse.TranscriptSegments) != 1 || detailResponse.TranscriptSegments[0].Text != "转写内容" {
+		t.Fatalf("unexpected transcript detail %+v", detailResponse.TranscriptSegments)
+	}
+	if detailResponse.Summary == nil || detailResponse.Summary.AbstractText != "摘要内容" {
+		t.Fatalf("unexpected summary detail %+v", detailResponse.Summary)
+	}
+	if len(detailResponse.ActionItems) != 1 || detailResponse.ActionItems[0] != "行动项" {
+		t.Fatalf("unexpected action items detail %+v", detailResponse.ActionItems)
+	}
+
+	checkpointGetRecorder := httptest.NewRecorder()
+	checkpointGetRequest := httptest.NewRequest(http.MethodGet, "/api/app/meetings/meeting-detail-1/checkpoint", nil)
+	checkpointGetRequest.Header.Set("Authorization", "Bearer "+memberSession.Token)
+	fixture.handler.ServeHTTP(checkpointGetRecorder, checkpointGetRequest)
+	if checkpointGetRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected checkpoint get status %d body=%s", checkpointGetRecorder.Code, checkpointGetRecorder.Body.String())
+	}
+	var checkpointResponse SessionCheckpointRecord
+	if err := json.NewDecoder(checkpointGetRecorder.Body).Decode(&checkpointResponse); err != nil {
+		t.Fatalf("decode checkpoint response: %v", err)
+	}
+	if checkpointResponse.LastUploadedMixedMS != 1800 {
+		t.Fatalf("unexpected checkpoint mixed offset %d", checkpointResponse.LastUploadedMixedMS)
 	}
 }
 

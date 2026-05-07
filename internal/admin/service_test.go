@@ -169,3 +169,140 @@ func TestNewServicePanicsWhenStoreIsNil(t *testing.T) {
 
 	NewService(nil, config.AIConfig{}, func(config.AIConfig) {})
 }
+
+func TestMeetingDetailServiceStoresTranscriptSummaryCheckpointAndAssets(t *testing.T) {
+	service := NewMeetingDetailService(NewMemoryMeetingDetailStore())
+
+	firstSegment, err := service.UpsertTranscriptSegment(context.Background(), TranscriptSegmentRecord{
+		MeetingID: "meeting-1",
+		SegmentID: "segment-2",
+		StartMS:   1000,
+		EndMS:     2000,
+		Text:      "第二段",
+		Revision:  2,
+	})
+	if err != nil {
+		t.Fatalf("upsert first transcript segment: %v", err)
+	}
+	if firstSegment.SegmentID != "segment-2" {
+		t.Fatalf("unexpected first segment id %q", firstSegment.SegmentID)
+	}
+
+	if _, err := service.UpsertTranscriptSegment(context.Background(), TranscriptSegmentRecord{
+		MeetingID: "meeting-1",
+		SegmentID: "segment-1",
+		StartMS:   0,
+		EndMS:     900,
+		Text:      "第一段",
+		Revision:  1,
+	}); err != nil {
+		t.Fatalf("upsert second transcript segment: %v", err)
+	}
+
+	segments, err := service.ListTranscriptSegmentsByMeeting(context.Background(), "meeting-1")
+	if err != nil {
+		t.Fatalf("list transcript segments: %v", err)
+	}
+	if len(segments) != 2 {
+		t.Fatalf("expected 2 transcript segments, got %d", len(segments))
+	}
+	if segments[0].SegmentID != "segment-1" {
+		t.Fatalf("expected transcript segments to sort by start time, got first id %q", segments[0].SegmentID)
+	}
+
+	summary, err := service.UpsertSummarySnapshot(context.Background(), SummarySnapshotRecord{
+		MeetingID:    "meeting-1",
+		Version:      3,
+		UpdatedAt:    "2026-05-07T10:00:00Z",
+		AbstractText: "会议摘要",
+		KeyPoints:    []string{"关键点"},
+		Decisions:    []string{"决策"},
+		Risks:        []string{"风险"},
+		ActionItems:  []string{"行动项-旧"},
+		IsFinal:      false,
+	})
+	if err != nil {
+		t.Fatalf("upsert summary: %v", err)
+	}
+	if summary.Version != 3 {
+		t.Fatalf("unexpected summary version %d", summary.Version)
+	}
+
+	mergedSummary, err := service.ApplyActionItems(context.Background(), ActionItemsRecord{
+		MeetingID: "meeting-1",
+		Version:   4,
+		UpdatedAt: "2026-05-07T10:01:00Z",
+		Items:     []string{"行动项-新"},
+		IsFinal:   true,
+	})
+	if err != nil {
+		t.Fatalf("apply action items: %v", err)
+	}
+	if mergedSummary.AbstractText != "会议摘要" {
+		t.Fatalf("expected action item merge to preserve summary abstract, got %q", mergedSummary.AbstractText)
+	}
+	if len(mergedSummary.ActionItems) != 1 || mergedSummary.ActionItems[0] != "行动项-新" {
+		t.Fatalf("unexpected merged action items %+v", mergedSummary.ActionItems)
+	}
+	if !mergedSummary.IsFinal {
+		t.Fatal("expected merged summary to become final")
+	}
+
+	recoveryToken := "recover-1"
+	checkpoint, err := service.UpsertCheckpoint(context.Background(), SessionCheckpointRecord{
+		MeetingID:                     "meeting-1",
+		LastControlSeq:                2,
+		LastUDPSeqSent:                7,
+		LastUploadedMixedMS:           1200,
+		LastTranscriptSegmentRevision: 3,
+		LastSummaryVersion:            4,
+		LastActionItemVersion:         4,
+		LocalRecordingState:           "recording",
+		RecoveryToken:                 &recoveryToken,
+		UpdatedAt:                     "2026-05-07T10:02:00Z",
+	})
+	if err != nil {
+		t.Fatalf("upsert checkpoint: %v", err)
+	}
+	if checkpoint.LastUDPSeqSent != 7 {
+		t.Fatalf("unexpected checkpoint udp seq %d", checkpoint.LastUDPSeqSent)
+	}
+
+	loadedCheckpoint, foundCheckpoint, err := service.FindCheckpoint(context.Background(), "meeting-1")
+	if err != nil {
+		t.Fatalf("find checkpoint: %v", err)
+	}
+	if !foundCheckpoint {
+		t.Fatal("expected checkpoint to exist")
+	}
+	if loadedCheckpoint.LastUploadedMixedMS != 1200 {
+		t.Fatalf("unexpected checkpoint last uploaded mixed ms %d", loadedCheckpoint.LastUploadedMixedMS)
+	}
+
+	micPath := "/tmp/meeting-1/mic.wav"
+	systemPath := "/tmp/meeting-1/system.wav"
+	mixedPath := "/tmp/meeting-1/mixed.wav"
+	assets, err := service.UpsertAudioAssets(context.Background(), AudioAssetRecord{
+		MeetingID:          "meeting-1",
+		MicOriginalPath:    &micPath,
+		SystemOriginalPath: &systemPath,
+		MixedUplinkPath:    &mixedPath,
+	})
+	if err != nil {
+		t.Fatalf("upsert audio assets: %v", err)
+	}
+	if assets.MixedUplinkPath == nil || *assets.MixedUplinkPath != mixedPath {
+		t.Fatalf("unexpected mixed uplink path %+v", assets.MixedUplinkPath)
+	}
+
+	loadedAssets, foundAssets, err := service.FindAudioAssets(context.Background(), "meeting-1")
+	if err != nil {
+		t.Fatalf("find audio assets: %v", err)
+	}
+	if !foundAssets {
+		t.Fatal("expected audio assets to exist")
+	}
+	if loadedAssets.SystemOriginalPath == nil || *loadedAssets.SystemOriginalPath != systemPath {
+		t.Fatalf("unexpected loaded system path %+v", loadedAssets.SystemOriginalPath)
+	}
+}
